@@ -4,26 +4,27 @@ const express = require('express');
 const fs = require('fs');
 
 // =====================================================================
-// 1. RENDER HTTP HEALTH SERVER & ENVIRONMENT KEYS
+// 1. RENDER HTTP HEALTH SERVER & 8-MODEL TRI-PROVIDER FALLBACK CHAIN
 // =====================================================================
 const app = express();
 const PORT = process.env.PORT || 10000;
 
 const API_KEYS = {
-    GROQ: process.env.GROQ_API_KEY || "",
-    CEREBRAS: process.env.CEREBRAS_API_KEY || "",
-    OPENROUTER: process.env.OPENROUTER_API_KEY || ""
+    GROQ: process.env.GROQ_API_KEY || "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",
+    OPENROUTER: process.env.OPENROUTER_API_KEY || "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",
+    HUGGINGFACE: process.env.HF_API_KEY || "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"
 };
 
+// EXACT 8 MODELS FALLBACK CHAIN (3 Groq + 3 OpenRouter + 2 Hugging Face)
 const AI_MODELS = [
-    { name: "Groq Llama-3.1-8B", provider: "GROQ", url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.1-8b-instant" },
-    { name: "Cerebras Llama-3.1-8B", provider: "CEREBRAS", url: "https://api.cerebras.ai/v1/chat/completions", model: "llama3.1-8b" },
-    { name: "Groq Llama-3.3-70B", provider: "GROQ", url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.3-70b-versatile" },
-    { name: "OpenRouter Gemini-2.0-Flash", provider: "OPENROUTER", url: "https://openrouter.ai/api/v1/chat/completions", model: "google/gemini-2.0-flash-exp:free" },
-    { name: "Groq Gemma2-9B", provider: "GROQ", url: "https://api.groq.com/openai/v1/chat/completions", model: "gemma2-9b-it" },
-    { name: "Cerebras Llama-3.3-70B", provider: "CEREBRAS", url: "https://api.cerebras.ai/v1/chat/completions", model: "llama-3.3-70b" },
-    { name: "OpenRouter Llama-3.1-8B", provider: "OPENROUTER", url: "https://openrouter.ai/api/v1/chat/completions", model: "meta-llama/llama-3.1-8b-instruct:free" },
-    { name: "Groq Mixtral-8x7B", provider: "GROQ", url: "https://api.groq.com/openai/v1/chat/completions", model: "mixtral-8x7b-32768" }
+    { name: "1. Groq Llama-3.1-8B", provider: "GROQ", url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.1-8b-instant" },
+    { name: "2. OpenRouter Gemini-2.0-Flash", provider: "OPENROUTER", url: "https://openrouter.ai/api/v1/chat/completions", model: "google/gemini-2.0-flash-exp:free" },
+    { name: "3. HF Qwen-2.5-72B", provider: "HUGGINGFACE", url: "https://router.huggingface.co/v1/chat/completions", model: "Qwen/Qwen2.5-72B-Instruct" },
+    { name: "4. Groq Llama-3.3-70B", provider: "GROQ", url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.3-70b-versatile" },
+    { name: "5. OpenRouter Llama-3.1-8B", provider: "OPENROUTER", url: "https://openrouter.ai/api/v1/chat/completions", model: "meta-llama/llama-3.1-8b-instruct:free" },
+    { name: "6. HF Mistral-7B-v0.3", provider: "HUGGINGFACE", url: "https://router.huggingface.co/v1/chat/completions", model: "mistralai/Mistral-7B-Instruct-v0.3" },
+    { name: "7. Groq Gemma2-9B", provider: "GROQ", url: "https://api.groq.com/openai/v1/chat/completions", model: "gemma2-9b-it" },
+    { name: "8. OpenRouter Qwen-2.5-7B", provider: "OPENROUTER", url: "https://openrouter.ai/api/v1/chat/completions", model: "qwen/qwen-2.5-7b-instruct:free" }
 ];
 
 const modelCooldowns = new Map();
@@ -34,7 +35,7 @@ app.get('/', (req, res) => {
     const memUsage = (process.memoryUsage().rss / 1024 / 1024).toFixed(2);
     res.status(200).json({
         status: 'healthy',
-        service: 'WhatsApp Selective 8-AI Userbot',
+        service: 'WhatsApp Selective 8-AI Userbot (Groq + OpenRouter + HF)',
         ram_usage_mb: `${memUsage} MB`,
         uptime_sec: Math.floor(process.uptime())
     });
@@ -53,7 +54,7 @@ let state = {
     aiGlobalAll: false,
     aiChats: [],
     aiTargets: {},
-    aiSystemPrompt: "You are replying on WhatsApp on behalf of the user. Keep replies short, natural, casual Hinglish/English, max 1-2 sentences.",
+    aiSystemPrompt: "You are replying on WhatsApp on behalf of the user. Keep replies short, natural, brutally abusive ,savage and insulting Hinglish/English, max 3-4 sentences.",
     gcReplies: [
         "Hello! Currently away, will reply shortly ⚡",
         "Active in group, message acknowledged 👍",
@@ -97,13 +98,13 @@ let state = {
 if (fs.existsSync(SETTINGS_FILE)) {
     try {
         state = { ...state, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
-    } catch (e) {}
+    } catch (E) {}
 }
 
 function saveSettings() {
     try {
         fs.writeFileSync(SETTINGS_FILE, JSON.stringify(state, null, 2));
-    } catch (e) {}
+    } catch (E) {}
 }
 
 const gcIndex = new Map();
@@ -117,21 +118,21 @@ const COOLDOWN_MS = 2500;
 // =====================================================================
 setInterval(() => {
     const now = Date.now();
-    for (const [k, t] of lastReplyTime.entries()) {
-        if (now - t > 45000) lastReplyTime.delete(k);
+    for (const [K, T] of lastReplyTime.entries()) {
+        if (now - T > 45000) lastReplyTime.delete(K);
     }
-    for (const [m, exp] of modelCooldowns.entries()) {
-        if (now > exp) modelCooldowns.delete(m);
+    for (const [M, exp] of modelCooldowns.entries()) {
+        if (now > exp) modelCooldowns.delete(M);
     }
     if (gcIndex.size > 300) gcIndex.clear();
     if (dmIndex.size > 300) dmIndex.clear();
     if (global.gc) {
-        try { global.gc(); } catch (e) {}
+        try { global.gc(); } catch (E) {}
     }
 }, 45000);
 
 // =====================================================================
-// 4. 8-MODEL AI FALLBACK GENERATOR
+// 4. 8-MODEL TRI-PROVIDER FALLBACK GENERATOR
 // =====================================================================
 async function generateAIReply(userMessage, senderName, isGroup) {
     if (activeAiCount >= MAX_CONCURRENT_AI) return null;
@@ -150,13 +151,19 @@ async function generateAIReply(userMessage, senderName, isGroup) {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 5000);
 
+            const headers = {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json'
+            };
+            if (cfg.provider === 'OPENROUTER') {
+                headers['HTTP-Referer'] = 'https://wa-userbot.local';
+                headers['X-Title'] = 'WA Userbot';
+            }
+
             try {
                 const response = await fetch(cfg.url, {
                     method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${apiKey}`,
-                        'Content-Type': 'application/json'
-                    },
+                    headers,
                     body: JSON.stringify({
                         model: cfg.model,
                         messages: [
@@ -220,7 +227,7 @@ client.on('qr', (qr) => {
 });
 
 client.on('ready', () => {
-    console.log('✅ WhatsApp Selective 8-AI & Full Control Userbot Ready!');
+    console.log('✅ WhatsApp Selective 8-AI (Groq + OpenRouter + HF) Userbot Ready!');
 });
 
 // =====================================================================
@@ -246,9 +253,9 @@ async function resolveTargetUser(msg, query) {
     const contacts = await client.getContacts();
     const search = query.replace(/^@/, '').toLowerCase().trim();
     if (!search) return null;
-    const found = contacts.find(c =>
-        (c.name && c.name.toLowerCase().includes(search)) ||
-        (c.pushname && c.pushname.toLowerCase().includes(search))
+    const found = contacts.find(C =>
+        (C.name && C.name.toLowerCase().includes(search)) ||
+        (C.pushname && C.pushname.toLowerCase().includes(search))
     );
     return found ? found.id._serialized : null;
 }
@@ -257,7 +264,7 @@ async function resolveGroup(groupQuery) {
     const chats = await client.getChats();
     const search = groupQuery.replace(/^@/, '').toLowerCase().trim();
     if (!search) return null;
-    const group = chats.find(c => c.isGroup && c.name.toLowerCase().includes(search));
+    const group = chats.find(C => C.isGroup && C.name.toLowerCase().includes(search));
     return group ? { id: group.id._serialized, name: group.name, chatObj: group } : null;
 }
 
@@ -461,38 +468,38 @@ client.on('message_create', async (msg) => {
         }
         if (cl === 'aistatus') {
             const mem = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
-            const activeKeys = Object.entries(API_KEYS).filter(([_, v]) => v).map(([k]) => k).join(', ') || 'None';
+            const activeProviders = Object.entries(API_KEYS).filter(([_, V]) => V).map(([K]) => K).join(' + ') || 'None';
             const totalTargetAi = Object.values(state.aiTargets).reduce((acc, arr) => acc + arr.length, 0);
             return await fb(
-                `🤖 *SELECTIVE AI STATUS*\n` +
+                `🤖 *SELECTIVE 8-AI STATUS*\n` +
                 `• Global AI Mode: ${state.aiGlobalAll ? '🟢 ON (All)' : '🟡 SELECTIVE ONLY'}\n` +
                 `• AI Enabled Chats (DM/GC): ${state.aiChats.length}\n` +
                 `• AI Enabled Targets: ${totalTargetAi}\n` +
-                `• Active API Providers: ${activeKeys}\n` +
+                `• Active Providers: ${activeProviders} (8 Models)\n` +
                 `• RAM Usage: ${mem} MB / 512 MB`,
                 false
             );
         }
 
         // --- 5-SLOT MESSAGES ---
-        if (cl === 'gcmsgs') return await fb(`👥 *5 GC REPLIES:*\n${state.gcReplies.map((m, i) => `*${i + 1}.* ${m}`).join('\n')}`, false);
-        if (cl === 'dmmsgs') return await fb(`💬 *5 DM REPLIES:*\n${state.dmReplies.map((m, i) => `*${i + 1}.* ${m}`).join('\n')}`, false);
+        if (cl === 'gcmsgs') return await fb(`👥 *5 GC REPLIES:*\n${state.gcReplies.map((M, I) => `*${I + 1}.* ${M}`).join('\n')}`, false);
+        if (cl === 'dmmsgs') return await fb(`💬 *5 DM REPLIES:*\n${state.dmReplies.map((M, I) => `*${I + 1}.* ${M}`).join('\n')}`, false);
         if (cl.startsWith('setgc ')) {
             const parts = cmd.split(/\s+/);
-            const s = parseInt(parts[1]);
-            if (s >= 1 && s <= 5 && parts.length >= 3) {
-                state.gcReplies[s - 1] = cmd.replace(/^setgc\s+\d+\s+/i, '');
+            const S = parseInt(parts[1]);
+            if (S >= 1 && S <= 5 && parts.length >= 3) {
+                state.gcReplies[S - 1] = cmd.replace(/^setgc\s+\d+\s+/i, '');
                 saveSettings();
-                return await fb(`✅ GC Slot #${s} updated`);
+                return await fb(`✅ GC Slot #${S} updated`);
             }
         }
         if (cl.startsWith('setdm ')) {
             const parts = cmd.split(/\s+/);
-            const s = parseInt(parts[1]);
-            if (s >= 1 && s <= 5 && parts.length >= 3) {
-                state.dmReplies[s - 1] = cmd.replace(/^setdm\s+\d+\s+/i, '');
+            const S = parseInt(parts[1]);
+            if (S >= 1 && S <= 5 && parts.length >= 3) {
+                state.dmReplies[S - 1] = cmd.replace(/^setdm\s+\d+\s+/i, '');
                 saveSettings();
-                return await fb(`✅ DM Slot #${s} updated`);
+                return await fb(`✅ DM Slot #${S} updated`);
             }
         }
 
@@ -591,7 +598,7 @@ client.on('message_create', async (msg) => {
         if (cl === 'nc' || cl.startsWith('nc ')) {
             if (!chat.isGroup) return await fb('⚠️ `*nc` sirf Group me kaam karta hai!');
             const raw = cmd.slice(2).trim();
-            const titles = raw ? raw.split(/[|\n,]+/).map(s => s.trim()).filter(Boolean) : state.ncTitles;
+            const titles = raw ? raw.split(/[|\n,]+/).map(S => S.trim()).filter(Boolean) : state.ncTitles;
             startNcLoop(chat, chatId, titles);
             return await fb(`🚀 *Auto-NC Started* (${titles.length} titles rotating every 4s)`);
         }

@@ -5,18 +5,17 @@ const {
     fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const qrcodeTerminal = require('qrcode-terminal');
 const QRCode = require('qrcode');
 const express = require('express');
 const fs = require('fs');
 
 // =====================================================================
-// 1. RENDER HTTP HEALTH SERVER + CLEAN /qr SCANNER PAGE
+// 1. RENDER HTTP HEALTH SERVER + PNG PHOTO QR ENDPOINTS (/qr & /qr.png)
 // =====================================================================
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-let latestQrDataUrl = null;
+let latestQrPngBuffer = null;
 let isWaConnected = false;
 
 const API_KEYS = {
@@ -45,45 +44,61 @@ app.get('/', (req, res) => {
     res.status(200).json({
         status: 'healthy',
         whatsapp_connected: isWaConnected,
-        qr_scan_url: '/qr',
+        qr_photo_page: '/qr',
+        direct_png_image: '/qr.png',
         ram_usage_mb: `${memUsage} MB`,
         uptime_sec: Math.floor(process.uptime())
     });
 });
 
-// Clean, Scannable QR Code Web Page (Never wraps or distorts)
+// Direct PNG Photo Route (Opens as a pure image in browser)
+app.get('/qr.png', (req, res) => {
+    if (!latestQrPngBuffer) {
+        return res.status(404).send('QR not generated yet or already connected.');
+    }
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.send(latestQrPngBuffer);
+});
+
+// Compact, Scannable Photo Viewer Page
 app.get('/qr', (req, res) => {
     if (isWaConnected) {
         return res.send(`
             <html><body style="background:#111;color:#0f0;font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;">
-                <h2>✅ WhatsApp Already Connected!</h2>
+                <h2>✅ WhatsApp Connected!</h2>
             </body></html>
         `);
     }
-    if (!latestQrDataUrl) {
+    if (!latestQrPngBuffer) {
         return res.send(`
             <html><head><meta http-equiv="refresh" content="3"></head>
             <body style="background:#111;color:#fff;font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;">
-                <h3>⏳ Generating QR Code... Page will auto-refresh.</h3>
+                <p>⏳ Generating QR Photo... Refreshing in 3s</p>
             </body></html>
         `);
     }
     res.send(`
         <html>
-        <head><meta http-equiv="refresh" content="15"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
-        <body style="background:#111;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;justify-content:center;align-items:center;height:100vh;margin:0;">
-            <h3 style="margin-bottom:12px;">📱 Scan in WhatsApp (Linked Devices)</h3>
-            <div style="background:#fff;padding:16px;border-radius:12px;">
-                <img src="${latestQrDataUrl}" style="width:260px;height:260px;display:block;" />
+        <head>
+            <meta http-equiv="refresh" content="15">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Scan WhatsApp QR</title>
+        </head>
+        <body style="background:#111;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;justify-content:center;align-items:center;height:100vh;margin:0;text-align:center;">
+            <p style="margin-bottom:10px;font-size:15px;">📱 Scan with WhatsApp Linked Devices</p>
+            <div style="background:#fff;padding:12px;border-radius:10px;display:inline-block;">
+                <img src="/qr.png?t=${Date.now()}" alt="WhatsApp QR" style="width:180px;height:180px;display:block;" />
             </div>
-            <p style="color:#aaa;font-size:13px;margin-top:12px;">Auto-refreshes every 15s</p>
+            <a href="/qr.png" download="whatsapp-qr.png" style="margin-top:14px;padding:8px 14px;background:#25D366;color:#000;text-decoration:none;border-radius:6px;font-weight:bold;font-size:13px;">⬇️ Save QR Photo</a>
+            <p style="color:#888;font-size:11px;margin-top:8px;">Auto-refreshes every 15s</p>
         </body>
         </html>
     `);
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌐 [Render Server] Listening on port ${PORT} | Open /qr in browser to scan`);
+    console.log(`🌐 [Render Server] Ready on port ${PORT} | Open /qr in browser for QR photo`);
 });
 
 // =====================================================================
@@ -366,10 +381,17 @@ async function startWhatsAppBot() {
         if (qr) {
             isWaConnected = false;
             try {
-                latestQrDataUrl = await QRCode.toDataURL(qr, { width: 260, margin: 1 });
-            } catch (e) {}
-            console.log('\n📱 QR READY! Open your Render URL + /qr in browser to scan cleanly (e.g., https://your-app.onrender.com/qr)\n');
-            qrcodeTerminal.generate(qr, { small: true });
+                // Generates a crisp, compact 180x180 PNG image buffer
+                latestQrPngBuffer = await QRCode.toBuffer(qr, {
+                    type: 'png',
+                    width: 180,
+                    margin: 1,
+                    color: { dark: '#000000', light: '#ffffff' }
+                });
+                console.log('📸 QR Photo Ready! Open your Render URL + /qr (or /qr.png) in browser to scan.');
+            } catch (e) {
+                console.error('QR generation error:', e.message);
+            }
         }
         if (connection === 'close') {
             isWaConnected = false;
@@ -378,7 +400,7 @@ async function startWhatsAppBot() {
             if (shouldReconnect) setTimeout(startWhatsAppBot, 3000);
         } else if (connection === 'open') {
             isWaConnected = true;
-            latestQrDataUrl = null;
+            latestQrPngBuffer = null;
             console.log('✅ WhatsApp Selective 8-AI Userbot Connected & Ready!');
         }
     });

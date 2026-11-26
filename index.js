@@ -5,15 +5,19 @@ const {
     fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const qrcode = require('qrcode-terminal');
+const qrcodeTerminal = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const express = require('express');
 const fs = require('fs');
 
 // =====================================================================
-// 1. RENDER HTTP HEALTH SERVER & 8-MODEL TRI-PROVIDER FALLBACK CHAIN
+// 1. RENDER HTTP HEALTH SERVER + CLEAN /qr SCANNER PAGE
 // =====================================================================
 const app = express();
 const PORT = process.env.PORT || 10000;
+
+let latestQrDataUrl = null;
+let isWaConnected = false;
 
 const API_KEYS = {
     GROQ: process.env.GROQ_API_KEY || "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",
@@ -40,14 +44,46 @@ app.get('/', (req, res) => {
     const memUsage = (process.memoryUsage().rss / 1024 / 1024).toFixed(2);
     res.status(200).json({
         status: 'healthy',
-        engine: 'Baileys Lightweight (Zero-Chromium)',
+        whatsapp_connected: isWaConnected,
+        qr_scan_url: '/qr',
         ram_usage_mb: `${memUsage} MB`,
         uptime_sec: Math.floor(process.uptime())
     });
 });
 
+// Clean, Scannable QR Code Web Page (Never wraps or distorts)
+app.get('/qr', (req, res) => {
+    if (isWaConnected) {
+        return res.send(`
+            <html><body style="background:#111;color:#0f0;font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;">
+                <h2>✅ WhatsApp Already Connected!</h2>
+            </body></html>
+        `);
+    }
+    if (!latestQrDataUrl) {
+        return res.send(`
+            <html><head><meta http-equiv="refresh" content="3"></head>
+            <body style="background:#111;color:#fff;font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;">
+                <h3>⏳ Generating QR Code... Page will auto-refresh.</h3>
+            </body></html>
+        `);
+    }
+    res.send(`
+        <html>
+        <head><meta http-equiv="refresh" content="15"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+        <body style="background:#111;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;justify-content:center;align-items:center;height:100vh;margin:0;">
+            <h3 style="margin-bottom:12px;">📱 Scan in WhatsApp (Linked Devices)</h3>
+            <div style="background:#fff;padding:16px;border-radius:12px;">
+                <img src="${latestQrDataUrl}" style="width:260px;height:260px;display:block;" />
+            </div>
+            <p style="color:#aaa;font-size:13px;margin-top:12px;">Auto-refreshes every 15s</p>
+        </body>
+        </html>
+    `);
+});
+
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌐 [Render Server] Listening on port ${PORT}`);
+    console.log(`🌐 [Render Server] Listening on port ${PORT} | Open /qr in browser to scan`);
 });
 
 // =====================================================================
@@ -207,7 +243,7 @@ async function generateAIReply(userMessage, senderName, isGroup) {
 }
 
 // =====================================================================
-// 5. REMOTE RESOLVERS (Number & Group Lookup from ANY Chat)
+// 5. REMOTE RESOLVERS
 // =====================================================================
 function normalizeJid(raw) {
     let digits = raw.replace(/\D/g, '');
@@ -308,7 +344,7 @@ function stopNcLoop(chatId) {
 }
 
 // =====================================================================
-// 6. START BAILEYS WHATSAPP SOCKET (INSTANT CONNECT & AUTO-RECONNECT)
+// 6. START BAILEYS WHATSAPP SOCKET
 // =====================================================================
 async function startWhatsAppBot() {
     const { state: authState, saveCreds } = await useMultiFileAuthState('./auth_info');
@@ -320,23 +356,30 @@ async function startWhatsAppBot() {
         logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
         browser: ['Ubuntu', 'Chrome', '20.0.04'],
-        syncFullHistory: false // Keeps RAM under 60MB
+        syncFullHistory: false
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
         if (qr) {
-            console.log('\n📱 SCAN THIS QR CODE IN WHATSAPP (Linked Devices):\n');
-            qrcode.generate(qr, { small: true });
+            isWaConnected = false;
+            try {
+                latestQrDataUrl = await QRCode.toDataURL(qr, { width: 260, margin: 1 });
+            } catch (e) {}
+            console.log('\n📱 QR READY! Open your Render URL + /qr in browser to scan cleanly (e.g., https://your-app.onrender.com/qr)\n');
+            qrcodeTerminal.generate(qr, { small: true });
         }
         if (connection === 'close') {
+            isWaConnected = false;
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log('⚠️ Connection closed. Reconnecting:', shouldReconnect);
             if (shouldReconnect) setTimeout(startWhatsAppBot, 3000);
         } else if (connection === 'open') {
-            console.log('✅ WhatsApp Selective 8-AI Userbot Connected & Ready! (RAM ~50MB)');
+            isWaConnected = true;
+            latestQrDataUrl = null;
+            console.log('✅ WhatsApp Selective 8-AI Userbot Connected & Ready!');
         }
     });
 
@@ -352,9 +395,6 @@ async function startWhatsAppBot() {
             const senderId = isGroup ? (msg.key.participant || chatId) : chatId;
             const text = extractText(msg);
 
-            // -------------------------------------------------------------
-            // A. OUTGOING COMMANDS (Executed by YOU from ANY chat)
-            // -------------------------------------------------------------
             if (fromMe) {
                 if (!text.startsWith('*')) {
                     const shouldPin = (state.pinAll && !state.pinExempts.includes(chatId)) || state.pinChats.includes(chatId);
@@ -378,7 +418,6 @@ async function startWhatsAppBot() {
                     } catch (e) {}
                 };
 
-                // --- HELP ---
                 if (['help', 'commands', 'cmds'].includes(cl)) {
                     await fb(
                         `📋 *WHATSAPP SELECTIVE 8-AI USERBOT COMMANDS*\n\n` +
@@ -408,7 +447,6 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
-                // --- GLOBAL AI ---
                 if (cl === 'ai all on' || cl === 'aiall on') {
                     state.aiGlobalAll = true;
                     saveSettings();
@@ -422,7 +460,6 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
-                // --- TARGET AI ---
                 if (cl.startsWith('target ai') || cl.startsWith('stop target ai')) {
                     const isStop = cl.startsWith('stop');
                     const arg = cmd.replace(/^(stop\s+)?target\s+ai\s*/i, '').trim();
@@ -442,7 +479,6 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
-                // --- SELECTIVE CHAT AI ---
                 if (cl === 'ai on' || cl.startsWith('ai on ') || cl === 'ai off' || cl.startsWith('ai off ') || cl === 'aion' || cl === 'aioff') {
                     const isOff = cl.startsWith('ai off') || cl === 'aioff';
                     const arg = cmd.replace(/^(ai\s+on|ai\s+off|aion|aioff)\s*/i, '').trim();
@@ -509,7 +545,6 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
-                // --- 5-SLOT MESSAGES ---
                 if (cl === 'gcmsgs') { await fb(`👥 *5 GC REPLIES:*\n${state.gcReplies.map((m, i) => `*${i + 1}.* ${m}`).join('\n')}`, false); continue; }
                 if (cl === 'dmmsgs') { await fb(`💬 *5 DM REPLIES:*\n${state.dmReplies.map((m, i) => `*${i + 1}.* ${m}`).join('\n')}`, false); continue; }
                 if (cl.startsWith('setgc ')) {
@@ -533,7 +568,6 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
-                // --- NORMAL TARGET REPLY ---
                 if (cl.startsWith('target reply') || cl.startsWith('stop target reply')) {
                     const isStop = cl.startsWith('stop');
                     const arg = cmd.replace(/^(stop\s+)?target\s+reply\s*/i, '').trim();
@@ -553,7 +587,6 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
-                // --- TARGET MUTE / LOCK / NC ---
                 const targetMap = [
                     { prefix: 'target mute', dict: 'targetMutes', label: 'Target Mute' },
                     { prefix: 'target lock', dict: 'targetLocks', label: 'Target Lock' },
@@ -585,7 +618,6 @@ async function startWhatsAppBot() {
                 }
                 if (handledTarget) continue;
 
-                // --- REPLY ALL ---
                 if (cl.startsWith('reply all') || cl.startsWith('stop reply all')) {
                     const isStop = cl.startsWith('stop');
                     const arg = cmd.replace(/^(stop\s+)?reply\s+all\s*/i, '').trim();
@@ -616,7 +648,6 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
-                // --- NORMAL DM REPLY ---
                 if (cl === 'reply' || cl.startsWith('reply ') || cl === 'stop reply' || cl.startsWith('stop reply ')) {
                     const isStop = cl.startsWith('stop');
                     const arg = cmd.replace(/^(stop\s+)?reply\s*/i, '').trim();
@@ -629,7 +660,6 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
-                // --- CONTINUOUS NAME CHANGER ---
                 if (cl === 'stopnc' || cl === 'stop nc' || cl === 'unnc') {
                     stopNcLoop(chatId);
                     await fb('🛑 *Continuous NC Stopped*');
@@ -644,7 +674,6 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
-                // --- MUTE & LOCK ---
                 if (cl === 'muteall' || cl === 'stop muteall') {
                     state.muteAllDms = (cl === 'muteall');
                     if (!state.muteAllDms) state.unmuteExempts = [];
@@ -673,7 +702,6 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
-                // --- PIN ---
                 if (cl === 'pinall' || cl === 'stop pinall' || cl === 'unpinall') {
                     state.pinAll = (cl === 'pinall');
                     saveSettings();
@@ -695,7 +723,6 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
-                // --- STOPALL & STATUS ---
                 if (cl === 'stopall' || cl === 'stop all') {
                     stopNcLoop(chatId);
                     state.aiChats = state.aiChats.filter(id => id !== chatId);
@@ -805,17 +832,10 @@ async function startWhatsAppBot() {
                     sock.groupUpdateSubject(chatId, `🎯 ALERT: ${senderName.slice(0, 18)}`).catch(() => {});
                 }
 
-                if (isGroup) {
-                    await sock.sendMessage(chatId, {
-                        text: `${tagText} ${finalReplyText}`,
-                        mentions: [senderId]
-                    }, { quoted: msg });
-                } else {
-                    await sock.sendMessage(chatId, {
-                        text: `${tagText} ${finalReplyText}`,
-                        mentions: [senderId]
-                    }, { quoted: msg });
-                }
+                await sock.sendMessage(chatId, {
+                    text: `${tagText} ${finalReplyText}`,
+                    mentions: [senderId]
+                }, { quoted: msg });
             } catch (err) {
                 console.error('Reply error:', err.message);
             }

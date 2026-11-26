@@ -1,7 +1,7 @@
 {
   "name": "wa-selective-8ai-userbot",
-  "version": "4.0.0",
-  "description": "Ultra-Lightweight WhatsApp 8-AI Userbot (No Chromium)",
+  "version": "4.1.0",
+  "description": "Ultra-Lightweight WhatsApp 8-AI Userbot with Web /qr Endpoint",
   "main": "index.js",
   "scripts": {
     "start": "node --expose-gc index.js"
@@ -10,6 +10,7 @@
     "@whiskeysockets/baileys": "^6.7.9",
     "express": "^4.18.2",
     "pino": "^9.0.0",
+    "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0"
   },
   "engines": {

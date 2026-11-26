@@ -1,10 +1,10 @@
 {
   "name": "wa-selective-8ai-userbot",
-  "version": "4.2.0",
-  "description": "Lightweight WhatsApp 8-AI Userbot with Clean PNG QR Photo",
+  "version": "5.0.0",
+  "description": "Ultra-Fast Low-RAM WhatsApp 8-AI Userbot",
   "main": "index.js",
   "scripts": {
-    "start": "node --expose-gc index.js"
+    "start": "node --expose-gc --max-old-space-size=380 index.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.9",

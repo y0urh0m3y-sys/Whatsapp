@@ -1,16 +1,16 @@
 {
   "name": "wa-selective-8ai-userbot",
-  "version": "3.0.0",
-  "description": "WhatsApp Personal Selective 8-Model AI & Full Control Userbot",
+  "version": "4.0.0",
+  "description": "Ultra-Lightweight WhatsApp 8-AI Userbot (No Chromium)",
   "main": "index.js",
   "scripts": {
     "start": "node --expose-gc index.js"
   },
   "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
     "express": "^4.18.2",
-    "puppeteer": "^21.5.0",
-    "qrcode-terminal": "^0.12.0",
-    "whatsapp-web.js": "^1.23.0"
+    "pino": "^9.0.0",
+    "qrcode-terminal": "^0.12.0"
   },
   "engines": {
     "node": ">=18.0.0"

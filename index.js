@@ -8,15 +8,52 @@ const pino = require('pino');
 const QRCode = require('qrcode');
 const express = require('express');
 const fs = require('fs');
+const path = require('path');
 
 // =====================================================================
-// 1. RENDER HTTP HEALTH SERVER + PNG PHOTO QR ENDPOINTS (/qr & /qr.png)
+// 1. RENDER HTTP HEALTH SERVER + SLIM SESSION PERSISTENCE
 // =====================================================================
 const app = express();
 const PORT = process.env.PORT || 10000;
+const AUTH_DIR = './auth_info';
 
 let latestQrPngBuffer = null;
 let isWaConnected = false;
+
+// Restore ONLY creds.json from Render Environment Variable (WA_SESSION_B64)
+function restoreSessionFromEnv() {
+    const b64 = process.env.WA_SESSION_B64;
+    if (!b64) return false;
+    try {
+        if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+        const decoded = Buffer.from(b64, 'base64').toString('utf8');
+        const parsed = JSON.parse(decoded);
+        if (parsed['creds.json']) {
+            fs.writeFileSync(path.join(AUTH_DIR, 'creds.json'), parsed['creds.json'], 'utf8');
+        } else {
+            fs.writeFileSync(path.join(AUTH_DIR, 'creds.json'), decoded, 'utf8');
+        }
+        console.log('♻️ Restored WhatsApp creds.json from WA_SESSION_B64!');
+        return true;
+    } catch (e) {
+        console.error('⚠️ Failed to restore WA_SESSION_B64:', e.message);
+        return false;
+    }
+}
+
+// Export ONLY creds.json (Compact & safe for Render Env limits)
+function exportSessionToBase64() {
+    const credsPath = path.join(AUTH_DIR, 'creds.json');
+    if (!fs.existsSync(credsPath)) return null;
+    try {
+        const credsContent = fs.readFileSync(credsPath, 'utf8');
+        return Buffer.from(JSON.stringify({ 'creds.json': credsContent })).toString('base64');
+    } catch (e) {
+        return null;
+    }
+}
+
+restoreSessionFromEnv();
 
 const API_KEYS = {
     GROQ: process.env.GROQ_API_KEY || "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",
@@ -44,29 +81,44 @@ app.get('/', (req, res) => {
     res.status(200).json({
         status: 'healthy',
         whatsapp_connected: isWaConnected,
-        qr_photo_page: '/qr',
-        direct_png_image: '/qr.png',
+        session_env_configured: Boolean(process.env.WA_SESSION_B64),
         ram_usage_mb: `${memUsage} MB`,
         uptime_sec: Math.floor(process.uptime())
     });
 });
 
-// Direct PNG Photo Route (Opens as a pure image in browser)
-app.get('/qr.png', (req, res) => {
-    if (!latestQrPngBuffer) {
-        return res.status(404).send('QR not generated yet or already connected.');
+app.get('/session', (req, res) => {
+    if (!isWaConnected) {
+        return res.status(400).send('<h3>⚠️ Pehle /qr par jaakar WhatsApp scan karein, phir refresh karein.</h3>');
     }
+    const b64 = exportSessionToBase64();
+    if (!b64) return res.status(500).send('Session export failed.');
+    res.send(`
+        <html>
+        <body style="background:#111;color:#fff;font-family:sans-serif;padding:20px;">
+            <h3>🔑 Permanent Session Key (WA_SESSION_B64)</h3>
+            <p style="color:#aaa;font-size:13px;">Is string ko copy karke Render Dashboard &rarr; Environment &rarr; <b>WA_SESSION_B64</b> me save kar dein:</p>
+            <textarea id="s" rows="8" style="width:100%;background:#222;color:#0f0;border:1px solid #444;padding:10px;border-radius:6px;" readonly>${b64}</textarea>
+            <br><br>
+            <button onclick="navigator.clipboard.writeText(document.getElementById('s').value);alert('Copied!')" style="padding:10px 18px;background:#25D366;color:#000;border:none;border-radius:6px;font-weight:bold;cursor:pointer;">📋 Copy Session String</button>
+        </body>
+        </html>
+    `);
+});
+
+app.get('/qr.png', (req, res) => {
+    if (!latestQrPngBuffer) return res.status(404).send('QR not available.');
     res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Cache-Control', 'no-store');
     res.send(latestQrPngBuffer);
 });
 
-// Compact, Scannable Photo Viewer Page
 app.get('/qr', (req, res) => {
     if (isWaConnected) {
         return res.send(`
-            <html><body style="background:#111;color:#0f0;font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;">
+            <html><body style="background:#111;color:#0f0;font-family:sans-serif;display:flex;flex-direction:column;justify-content:center;align-items:center;height:100vh;margin:0;text-align:center;">
                 <h2>✅ WhatsApp Connected!</h2>
+                <p style="color:#ccc;">Ab <a href="/session" style="color:#25D366;">/session</a> khol kar WA_SESSION_B64 Render me save karein.</p>
             </body></html>
         `);
     }
@@ -80,25 +132,19 @@ app.get('/qr', (req, res) => {
     }
     res.send(`
         <html>
-        <head>
-            <meta http-equiv="refresh" content="15">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Scan WhatsApp QR</title>
-        </head>
+        <head><meta http-equiv="refresh" content="15"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
         <body style="background:#111;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;justify-content:center;align-items:center;height:100vh;margin:0;text-align:center;">
             <p style="margin-bottom:10px;font-size:15px;">📱 Scan with WhatsApp Linked Devices</p>
             <div style="background:#fff;padding:12px;border-radius:10px;display:inline-block;">
-                <img src="/qr.png?t=${Date.now()}" alt="WhatsApp QR" style="width:180px;height:180px;display:block;" />
+                <img src="/qr.png?t=${Date.now()}" style="width:180px;height:180px;display:block;" />
             </div>
-            <a href="/qr.png" download="whatsapp-qr.png" style="margin-top:14px;padding:8px 14px;background:#25D366;color:#000;text-decoration:none;border-radius:6px;font-weight:bold;font-size:13px;">⬇️ Save QR Photo</a>
-            <p style="color:#888;font-size:11px;margin-top:8px;">Auto-refreshes every 15s</p>
         </body>
         </html>
     `);
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌐 [Render Server] Ready on port ${PORT} | Open /qr in browser for QR photo`);
+    console.log(`🌐 [Render Server] Listening on port ${PORT}`);
 });
 
 // =====================================================================
@@ -163,32 +209,36 @@ function saveSettings() {
     } catch (e) {}
 }
 
+// Fast In-Memory Caches (Prevents slow API calls & RAM spikes)
 const gcIndex = new Map();
 const dmIndex = new Map();
 const lastReplyTime = new Map();
 const ncIntervals = new Map();
-const COOLDOWN_MS = 2500;
+const groupCache = new Map(); // { groupJid: groupName }
+let lastGroupSync = 0;
+const COOLDOWN_MS = 2000;
 
 // =====================================================================
-// 3. 45-SECOND RAM & MEMORY AUTO-CLEANER
+// 3. 30-SECOND RAM & GARBAGE CLEANER (PREVENTS CRASHES & LAG)
 // =====================================================================
 setInterval(() => {
     const now = Date.now();
     for (const [k, t] of lastReplyTime.entries()) {
-        if (now - t > 45000) lastReplyTime.delete(k);
+        if (now - t > 30000) lastReplyTime.delete(k);
     }
     for (const [m, exp] of modelCooldowns.entries()) {
         if (now > exp) modelCooldowns.delete(m);
     }
-    if (gcIndex.size > 300) gcIndex.clear();
-    if (dmIndex.size > 300) dmIndex.clear();
+    if (gcIndex.size > 200) gcIndex.clear();
+    if (dmIndex.size > 200) dmIndex.clear();
+    if (groupCache.size > 300) groupCache.clear();
     if (global.gc) {
         try { global.gc(); } catch (e) {}
     }
-}, 45000);
+}, 30000);
 
 // =====================================================================
-// 4. 8-MODEL TRI-PROVIDER FALLBACK GENERATOR
+// 4. 8-MODEL TRI-PROVIDER FALLBACK GENERATOR (3.5s FAST TIMEOUT)
 // =====================================================================
 async function generateAIReply(userMessage, senderName, isGroup) {
     if (activeAiCount >= MAX_CONCURRENT_AI) return null;
@@ -205,7 +255,7 @@ async function generateAIReply(userMessage, senderName, isGroup) {
             if (now < cooldownUntil) continue;
 
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 5000);
+            const timeout = setTimeout(() => controller.abort(), 3500);
 
             const headers = {
                 'Authorization': `Bearer ${apiKey}`,
@@ -224,9 +274,9 @@ async function generateAIReply(userMessage, senderName, isGroup) {
                         model: cfg.model,
                         messages: [
                             { role: "system", content: `${state.aiSystemPrompt} Replying to ${senderName} in a ${isGroup ? 'group' : 'DM'}.` },
-                            { role: "user", content: userMessage.slice(0, 300) }
+                            { role: "user", content: userMessage.slice(0, 250) }
                         ],
-                        max_tokens: 90,
+                        max_tokens: 80,
                         temperature: 0.7
                     }),
                     signal: controller.signal
@@ -258,7 +308,7 @@ async function generateAIReply(userMessage, senderName, isGroup) {
 }
 
 // =====================================================================
-// 5. REMOTE RESOLVERS
+// 5. INSTANT CACHED RESOLVERS (ZERO LAG)
 // =====================================================================
 function normalizeJid(raw) {
     let digits = raw.replace(/\D/g, '');
@@ -286,7 +336,7 @@ function getMentionedJid(msg) {
     return null;
 }
 
-async function resolveTargetUser(msg, query) {
+function resolveTargetUser(msg, query) {
     const mentioned = getMentionedJid(msg);
     if (mentioned) return mentioned;
     const cleanNum = query.replace(/[@\s+-]/g, '');
@@ -294,29 +344,44 @@ async function resolveTargetUser(msg, query) {
     return null;
 }
 
-async function resolveGroup(sock, groupQuery) {
+async function resolveGroupFast(sock, groupQuery) {
     const search = groupQuery.replace(/^@/, '').toLowerCase().trim();
     if (!search) return null;
-    try {
-        const groups = await sock.groupFetchAllParticipating();
-        for (const [jid, meta] of Object.entries(groups)) {
-            if (meta.subject && meta.subject.toLowerCase().includes(search)) {
-                return { id: jid, name: meta.subject };
-            }
+
+    // 1. Search instant memory cache first (0ms)
+    for (const [jid, name] of groupCache.entries()) {
+        if (name.toLowerCase().includes(search)) {
+            return { id: jid, name };
         }
-    } catch (e) {}
+    }
+
+    // 2. Sync group list at most once every 5 minutes to prevent lag/crash
+    if (Date.now() - lastGroupSync > 300000) {
+        lastGroupSync = Date.now();
+        try {
+            const groups = await sock.groupFetchAllParticipating();
+            for (const [jid, meta] of Object.entries(groups)) {
+                if (meta.subject) groupCache.set(jid, meta.subject);
+            }
+            for (const [jid, name] of groupCache.entries()) {
+                if (name.toLowerCase().includes(search)) {
+                    return { id: jid, name };
+                }
+            }
+        } catch (e) {}
+    }
     return null;
 }
 
 async function parseUserAndGroup(sock, msg, arg, chatId, isGroup) {
     let targetGroupId = isGroup ? chatId : 'GLOBAL';
-    let targetGroupName = isGroup ? 'Current Group' : 'All Groups';
+    let targetGroupName = isGroup ? (groupCache.get(chatId) || 'Current Group') : 'All Groups';
     let userPart = arg;
 
     const atMatches = arg.match(/@[^@]+/g);
     if (atMatches && atMatches.length >= 2) {
         const potentialGroup = atMatches[atMatches.length - 1].trim();
-        const grp = await resolveGroup(sock, potentialGroup);
+        const grp = await resolveGroupFast(sock, potentialGroup);
         if (grp) {
             targetGroupId = grp.id;
             targetGroupName = grp.name;
@@ -325,14 +390,14 @@ async function parseUserAndGroup(sock, msg, arg, chatId, isGroup) {
     } else if (arg.includes('@') && !arg.startsWith('@')) {
         const splitIdx = arg.indexOf('@');
         const potentialGroup = arg.slice(splitIdx).trim();
-        const grp = await resolveGroup(sock, potentialGroup);
+        const grp = await resolveGroupFast(sock, potentialGroup);
         if (grp) {
             targetGroupId = grp.id;
             targetGroupName = grp.name;
             userPart = arg.slice(0, splitIdx).trim();
         }
     }
-    const targetUserId = await resolveTargetUser(msg, userPart);
+    const targetUserId = resolveTargetUser(msg, userPart);
     return { targetUserId, targetGroupId, targetGroupName };
 }
 
@@ -347,7 +412,7 @@ function startNcLoop(sock, chatId, titles) {
         } catch (e) {
             stopNcLoop(chatId);
         }
-    }, 4000);
+    }, 4500);
     ncIntervals.set(chatId, interval);
 }
 
@@ -359,510 +424,538 @@ function stopNcLoop(chatId) {
 }
 
 // =====================================================================
-// 6. START BAILEYS WHATSAPP SOCKET
+// 6. START BAILEYS WHATSAPP SOCKET (SINGLE INSTANCE GUARD)
 // =====================================================================
+let isStarting = false;
+
 async function startWhatsAppBot() {
-    const { state: authState, saveCreds } = await useMultiFileAuthState('./auth_info');
-    const { version } = await fetchLatestBaileysVersion();
+    if (isStarting) return;
+    isStarting = true;
 
-    const sock = makeWASocket({
-        version,
-        auth: authState,
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: false,
-        browser: ['Ubuntu', 'Chrome', '20.0.04'],
-        syncFullHistory: false
-    });
+    try {
+        const { state: authState, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+        const { version } = await fetchLatestBaileysVersion();
 
-    sock.ev.on('creds.update', saveCreds);
+        const sock = makeWASocket({
+            version,
+            auth: authState,
+            logger: pino({ level: 'silent' }),
+            printQRInTerminal: false,
+            browser: ['Ubuntu', 'Chrome', '20.0.04'],
+            syncFullHistory: false,
+            markOnlineOnConnect: false,
+            generateHighQualityLinkPreview: false
+        });
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        if (qr) {
-            isWaConnected = false;
-            try {
-                // Generates a crisp, compact 180x180 PNG image buffer
-                latestQrPngBuffer = await QRCode.toBuffer(qr, {
-                    type: 'png',
-                    width: 180,
-                    margin: 1,
-                    color: { dark: '#000000', light: '#ffffff' }
-                });
-                console.log('📸 QR Photo Ready! Open your Render URL + /qr (or /qr.png) in browser to scan.');
-            } catch (e) {
-                console.error('QR generation error:', e.message);
+        sock.ev.on('creds.update', saveCreds);
+
+        // Cache group names automatically whenever groups update
+        sock.ev.on('groups.update', (updates) => {
+            for (const g of updates) {
+                if (g.id && g.subject) groupCache.set(g.id, g.subject);
             }
-        }
-        if (connection === 'close') {
-            isWaConnected = false;
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('⚠️ Connection closed. Reconnecting:', shouldReconnect);
-            if (shouldReconnect) setTimeout(startWhatsAppBot, 3000);
-        } else if (connection === 'open') {
-            isWaConnected = true;
-            latestQrPngBuffer = null;
-            console.log('✅ WhatsApp Selective 8-AI Userbot Connected & Ready!');
-        }
-    });
+        });
 
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify') return;
-
-        for (const msg of messages) {
-            if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
-
-            const chatId = msg.key.remoteJid;
-            const isGroup = chatId.endsWith('@g.us');
-            const fromMe = Boolean(msg.key.fromMe);
-            const senderId = isGroup ? (msg.key.participant || chatId) : chatId;
-            const text = extractText(msg);
-
-            if (fromMe) {
-                if (!text.startsWith('*')) {
-                    const shouldPin = (state.pinAll && !state.pinExempts.includes(chatId)) || state.pinChats.includes(chatId);
-                    if (shouldPin) {
-                        sock.sendMessage(chatId, { pin: msg.key, type: 1, time: 604800 }).catch(() => {});
-                    }
-                    continue;
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+            if (qr) {
+                isWaConnected = false;
+                try {
+                    latestQrPngBuffer = await QRCode.toBuffer(qr, {
+                        type: 'png',
+                        width: 180,
+                        margin: 1
+                    });
+                    console.log('📸 QR Ready! Open Render URL + /qr to scan.');
+                } catch (e) {}
+            }
+            if (connection === 'close') {
+                isWaConnected = false;
+                isStarting = false;
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                console.log(`⚠️ Disconnected (Code: ${statusCode}). Reconnecting in 5s...`);
+                if (statusCode === DisconnectReason.loggedOut && fs.existsSync(AUTH_DIR)) {
+                    fs.rmSync(AUTH_DIR, { recursive: true, force: true });
                 }
-
-                const cmd = text.slice(1).trim();
-                const cl = cmd.toLowerCase();
-
-                const fb = async (replyText, autoDel = true) => {
+                setTimeout(startWhatsAppBot, 5000);
+            } else if (connection === 'open') {
+                isWaConnected = true;
+                isStarting = false;
+                latestQrPngBuffer = null;
+                console.log('✅ WhatsApp Connected & Fast! Open /session to copy WA_SESSION_B64.');
+                // Populate group cache in background 3s after connect
+                setTimeout(async () => {
                     try {
-                        const sent = await sock.sendMessage(chatId, { text: replyText }, { quoted: msg });
-                        if (autoDel && sent?.key) {
-                            setTimeout(() => {
-                                sock.sendMessage(chatId, { delete: sent.key }).catch(() => {});
-                            }, 4500);
+                        const groups = await sock.groupFetchAllParticipating();
+                        for (const [jid, meta] of Object.entries(groups)) {
+                            if (meta.subject) groupCache.set(jid, meta.subject);
                         }
+                        lastGroupSync = Date.now();
                     } catch (e) {}
-                };
+                }, 3000);
+            }
+        });
 
-                if (['help', 'commands', 'cmds'].includes(cl)) {
-                    await fb(
-                        `📋 *WHATSAPP SELECTIVE 8-AI USERBOT COMMANDS*\n\n` +
-                        `🤖 *Selective 8-Model AI (Run from ANY chat):*\n` +
-                        `• \`*ai on\` / \`*ai off\` ➔ Current chat me AI reply ON/OFF\n` +
-                        `• \`*ai on 9876543210\` ➔ Specific DM me AI reply ON\n` +
-                        `• \`*ai off 9876543210\` ➔ Specific DM me AI reply OFF\n` +
-                        `• \`*ai on @GroupName\` ➔ Specific Group me AI reply ON\n` +
-                        `• \`*ai off @GroupName\` ➔ Specific Group me AI reply OFF\n` +
-                        `• \`*target ai @user/num [@group]\` ➔ Target ke liye AI ON\n` +
-                        `• \`*stop target ai @user/num [@group]\` ➔ Target ke liye AI OFF\n` +
-                        `• \`*ai all on\` / \`*ai all off\` ➔ Global AI ON/OFF\n` +
-                        `• \`*aiprompt <text>\` ➔ Change AI prompt\n` +
-                        `• \`*aistatus\` ➔ Active AI chats, models & RAM\n\n` +
-                        `🎯 *Normal 5-Slot Target & Chat Replies:*\n` +
-                        `• \`*target reply @user/num [@group]\` / \`*stop target reply...\`\n` +
-                        `• \`*reply [num]\` / \`*stop reply [num]\`\n` +
-                        `• \`*reply all [@group]\` / \`*reply all dm\`\n` +
-                        `• \`*gcmsgs\` / \`*dmmsgs\` / \`*setgc 1-5\` / \`*setdm 1-5\`\n\n` +
-                        `🔇 *Mute, Lock, NC & Pin:*\n` +
-                        `• \`*mute\` / \`*unmute\` / \`*muteall\` / \`*mutegc\` / \`*lock\` / \`*lockall\`\n` +
-                        `• \`*target mute @user [@group]\` / \`*target lock @user [@group]\`\n` +
-                        `• \`*nc [n1 | n2]\` / \`*stopnc\` / \`*pin\` / \`*pinall\`\n` +
-                        `• \`*status\` / \`*stopall\``,
-                        false
-                    );
-                    continue;
-                }
+        sock.ev.on('messages.upsert', async ({ messages, type }) => {
+            if (type !== 'notify') return;
 
-                if (cl === 'ai all on' || cl === 'aiall on') {
-                    state.aiGlobalAll = true;
-                    saveSettings();
-                    await fb('🤖 *Global AI ON*');
-                    continue;
-                }
-                if (cl === 'ai all off' || cl === 'aiall off') {
-                    state.aiGlobalAll = false;
-                    saveSettings();
-                    await fb('🛑 *Global AI OFF* (Selective mode active)');
-                    continue;
-                }
+            for (const msg of messages) {
+                if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
 
-                if (cl.startsWith('target ai') || cl.startsWith('stop target ai')) {
-                    const isStop = cl.startsWith('stop');
-                    const arg = cmd.replace(/^(stop\s+)?target\s+ai\s*/i, '').trim();
-                    const { targetUserId, targetGroupId, targetGroupName } = await parseUserAndGroup(sock, msg, arg, chatId, isGroup);
-                    if (!targetUserId) { await fb('⚠️ Target number ya @mention dein!'); continue; }
+                const chatId = msg.key.remoteJid;
+                const isGroup = chatId.endsWith('@g.us');
+                const fromMe = Boolean(msg.key.fromMe);
+                const senderId = isGroup ? (msg.key.participant || chatId) : chatId;
+                const text = extractText(msg);
 
-                    if (!state.aiTargets[targetGroupId]) state.aiTargets[targetGroupId] = [];
-                    if (isStop) {
-                        state.aiTargets[targetGroupId] = state.aiTargets[targetGroupId].filter(id => id !== targetUserId);
-                        saveSettings();
-                        await fb(`🛑 *Target AI OFF* for \`${targetUserId.split('@')[0]}\` in *${targetGroupName}*`);
-                    } else {
-                        if (!state.aiTargets[targetGroupId].includes(targetUserId)) state.aiTargets[targetGroupId].push(targetUserId);
-                        saveSettings();
-                        await fb(`🤖 *Target AI ON* for \`${targetUserId.split('@')[0]}\` in *${targetGroupName}*`);
-                    }
-                    continue;
-                }
-
-                if (cl === 'ai on' || cl.startsWith('ai on ') || cl === 'ai off' || cl.startsWith('ai off ') || cl === 'aion' || cl === 'aioff') {
-                    const isOff = cl.startsWith('ai off') || cl === 'aioff';
-                    const arg = cmd.replace(/^(ai\s+on|ai\s+off|aion|aioff)\s*/i, '').trim();
-
-                    let targetChatId = null;
-                    let targetLabel = '';
-
-                    if (!arg) {
-                        targetChatId = chatId;
-                        targetLabel = isGroup ? 'Current Group' : chatId.split('@')[0];
-                    } else if (arg.startsWith('@')) {
-                        const grp = await resolveGroup(sock, arg);
-                        if (grp) {
-                            targetChatId = grp.id;
-                            targetLabel = `Group: ${grp.name}`;
-                        } else {
-                            const usr = await resolveTargetUser(msg, arg);
-                            if (usr) { targetChatId = usr; targetLabel = `DM: ${usr.split('@')[0]}`; }
+                // ---------------------------------------------------------
+                // A. OUTGOING COMMANDS (INSTANT EXECUTION)
+                // ---------------------------------------------------------
+                if (fromMe) {
+                    if (!text.startsWith('*')) {
+                        const shouldPin = (state.pinAll && !state.pinExempts.includes(chatId)) || state.pinChats.includes(chatId);
+                        if (shouldPin) {
+                            sock.sendMessage(chatId, { pin: msg.key, type: 1, time: 604800 }).catch(() => {});
                         }
-                    } else {
-                        const usr = await resolveTargetUser(msg, arg);
-                        if (usr) {
-                            targetChatId = usr;
-                            targetLabel = `DM: ${usr.split('@')[0]}`;
-                        } else {
-                            const grp = await resolveGroup(sock, arg);
-                            if (grp) { targetChatId = grp.id; targetLabel = `Group: ${grp.name}`; }
-                        }
+                        continue;
                     }
 
-                    if (!targetChatId) { await fb(`⚠️ Chat ya Number "${arg}" nahi mila!`); continue; }
+                    const cmd = text.slice(1).trim();
+                    const cl = cmd.toLowerCase();
 
-                    if (isOff) {
-                        state.aiChats = state.aiChats.filter(id => id !== targetChatId);
-                        saveSettings();
-                        await fb(`🛑 *AI Reply OFF* for *${targetLabel}*`);
-                    } else {
-                        if (!state.aiChats.includes(targetChatId)) state.aiChats.push(targetChatId);
-                        saveSettings();
-                        await fb(`🤖 *AI Reply ON* for *${targetLabel}*`);
+                    const fb = (replyText, autoDel = true) => {
+                        sock.sendMessage(chatId, { text: replyText }, { quoted: msg }).then((sent) => {
+                            if (autoDel && sent?.key) {
+                                setTimeout(() => {
+                                    sock.sendMessage(chatId, { delete: sent.key }).catch(() => {});
+                                }, 4000);
+                            }
+                        }).catch(() => {});
+                    };
+
+                    if (['help', 'commands', 'cmds'].includes(cl)) {
+                        fb(
+                            `📋 *WHATSAPP SELECTIVE 8-AI COMMANDS*\n\n` +
+                            `🤖 *Selective AI (Run from ANY chat):*\n` +
+                            `• \`*ai on\` / \`*ai off\` ➔ Current chat AI ON/OFF\n` +
+                            `• \`*ai on 9876543210\` ➔ Specific DM AI ON\n` +
+                            `• \`*ai on @GroupName\` ➔ Specific Group AI ON\n` +
+                            `• \`*target ai @user/num [@group]\` ➔ Target AI ON\n` +
+                            `• \`*stop target ai @user/num [@group]\` ➔ Target AI OFF\n` +
+                            `• \`*ai all on\` / \`*ai all off\` ➔ Global AI\n` +
+                            `• \`*aiprompt <text>\` / \`*aistatus\`\n\n` +
+                            `🎯 *5-Slot Target & Chat Replies:*\n` +
+                            `• \`*target reply @user/num [@group]\` / \`*stop target reply...\`\n` +
+                            `• \`*reply [num]\` / \`*stop reply [num]\`\n` +
+                            `• \`*reply all [@group]\` / \`*reply all dm\`\n` +
+                            `• \`*gcmsgs\` / \`*dmmsgs\` / \`*setgc 1-5\` / \`*setdm 1-5\`\n\n` +
+                            `🔇 *Mute, Lock, NC & Pin:*\n` +
+                            `• \`*mute\` / \`*unmute\` / \`*muteall\` / \`*mutegc\` / \`*lock\` / \`*lockall\`\n` +
+                            `• \`*target mute @user [@group]\` / \`*target lock @user [@group]\`\n` +
+                            `• \`*nc [n1 | n2]\` / \`*stopnc\` / \`*pin\` / \`*pinall\`\n` +
+                            `• \`*status\` / \`*stopall\``,
+                            false
+                        );
+                        continue;
                     }
-                    continue;
-                }
 
-                if (cl.startsWith('aiprompt ')) {
-                    state.aiSystemPrompt = cmd.slice(9).trim();
-                    saveSettings();
-                    await fb('✅ *AI System Prompt Updated!*');
-                    continue;
-                }
-
-                if (cl === 'aistatus') {
-                    const mem = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
-                    const totalTargetAi = Object.values(state.aiTargets).reduce((acc, arr) => acc + arr.length, 0);
-                    await fb(
-                        `🤖 *SELECTIVE 8-AI STATUS*\n` +
-                        `• Global AI Mode: ${state.aiGlobalAll ? '🟢 ON (All)' : '🟡 SELECTIVE ONLY'}\n` +
-                        `• AI Enabled Chats (DM/GC): ${state.aiChats.length}\n` +
-                        `• AI Enabled Targets: ${totalTargetAi}\n` +
-                        `• Providers: GROQ + OPENROUTER + HF (8 Models)\n` +
-                        `• RAM Usage: ${mem} MB / 512 MB`,
-                        false
-                    );
-                    continue;
-                }
-
-                if (cl === 'gcmsgs') { await fb(`👥 *5 GC REPLIES:*\n${state.gcReplies.map((m, i) => `*${i + 1}.* ${m}`).join('\n')}`, false); continue; }
-                if (cl === 'dmmsgs') { await fb(`💬 *5 DM REPLIES:*\n${state.dmReplies.map((m, i) => `*${i + 1}.* ${m}`).join('\n')}`, false); continue; }
-                if (cl.startsWith('setgc ')) {
-                    const parts = cmd.split(/\s+/);
-                    const s = parseInt(parts[1]);
-                    if (s >= 1 && s <= 5 && parts.length >= 3) {
-                        state.gcReplies[s - 1] = cmd.replace(/^setgc\s+\d+\s+/i, '');
+                    if (cl === 'ai all on' || cl === 'aiall on') {
+                        state.aiGlobalAll = true;
                         saveSettings();
-                        await fb(`✅ GC Slot #${s} updated`);
+                        fb('🤖 *Global AI ON*');
+                        continue;
                     }
-                    continue;
-                }
-                if (cl.startsWith('setdm ')) {
-                    const parts = cmd.split(/\s+/);
-                    const s = parseInt(parts[1]);
-                    if (s >= 1 && s <= 5 && parts.length >= 3) {
-                        state.dmReplies[s - 1] = cmd.replace(/^setdm\s+\d+\s+/i, '');
+                    if (cl === 'ai all off' || cl === 'aiall off') {
+                        state.aiGlobalAll = false;
                         saveSettings();
-                        await fb(`✅ DM Slot #${s} updated`);
+                        fb('🛑 *Global AI OFF*');
+                        continue;
                     }
-                    continue;
-                }
 
-                if (cl.startsWith('target reply') || cl.startsWith('stop target reply')) {
-                    const isStop = cl.startsWith('stop');
-                    const arg = cmd.replace(/^(stop\s+)?target\s+reply\s*/i, '').trim();
-                    const { targetUserId, targetGroupId, targetGroupName } = await parseUserAndGroup(sock, msg, arg, chatId, isGroup);
-                    if (!targetUserId) { await fb('⚠️ Target number ya @mention dein!'); continue; }
-
-                    if (!state.targetReplies[targetGroupId]) state.targetReplies[targetGroupId] = [];
-                    if (isStop) {
-                        state.targetReplies[targetGroupId] = state.targetReplies[targetGroupId].filter(id => id !== targetUserId);
-                        saveSettings();
-                        await fb(`🛑 *Target Reply OFF* for \`${targetUserId.split('@')[0]}\` in *${targetGroupName}*`);
-                    } else {
-                        if (!state.targetReplies[targetGroupId].includes(targetUserId)) state.targetReplies[targetGroupId].push(targetUserId);
-                        saveSettings();
-                        await fb(`🎯 *Target Reply ON* for \`${targetUserId.split('@')[0]}\` in *${targetGroupName}*`);
-                    }
-                    continue;
-                }
-
-                const targetMap = [
-                    { prefix: 'target mute', dict: 'targetMutes', label: 'Target Mute' },
-                    { prefix: 'target lock', dict: 'targetLocks', label: 'Target Lock' },
-                    { prefix: 'target nc reply', dict: 'targetNcReply', label: 'Target NC Reply' },
-                    { prefix: 'target nc mute', dict: 'targetNcMute', label: 'Target NC Mute' },
-                    { prefix: 'target nc lock', dict: 'targetNcLock', label: 'Target NC Lock' }
-                ];
-                let handledTarget = false;
-                for (const item of targetMap) {
-                    if (cl.startsWith(item.prefix) || cl.startsWith(`stop ${item.prefix}`)) {
-                        handledTarget = true;
+                    if (cl.startsWith('target ai') || cl.startsWith('stop target ai')) {
                         const isStop = cl.startsWith('stop');
-                        const arg = cmd.replace(new RegExp(`^(stop\\s+)?${item.prefix}\\s*`, 'i'), '').trim();
+                        const arg = cmd.replace(/^(stop\s+)?target\s+ai\s*/i, '').trim();
                         const { targetUserId, targetGroupId, targetGroupName } = await parseUserAndGroup(sock, msg, arg, chatId, isGroup);
-                        if (!targetUserId) { await fb('⚠️ Target user nahi mila!'); break; }
+                        if (!targetUserId) { fb('⚠️ Target number ya @mention dein!'); continue; }
 
-                        if (!state[item.dict][targetGroupId]) state[item.dict][targetGroupId] = [];
+                        if (!state.aiTargets[targetGroupId]) state.aiTargets[targetGroupId] = [];
                         if (isStop) {
-                            state[item.dict][targetGroupId] = state[item.dict][targetGroupId].filter(id => id !== targetUserId);
+                            state.aiTargets[targetGroupId] = state.aiTargets[targetGroupId].filter(id => id !== targetUserId);
                             saveSettings();
-                            await fb(`🛑 *${item.label} OFF* for \`${targetUserId.split('@')[0]}\` in *${targetGroupName}*`);
+                            fb(`🛑 *Target AI OFF* for \`${targetUserId.split('@')[0]}\` in *${targetGroupName}*`);
                         } else {
-                            if (!state[item.dict][targetGroupId].includes(targetUserId)) state[item.dict][targetGroupId].push(targetUserId);
+                            if (!state.aiTargets[targetGroupId].includes(targetUserId)) state.aiTargets[targetGroupId].push(targetUserId);
                             saveSettings();
-                            await fb(`🎯 *${item.label} ON* for \`${targetUserId.split('@')[0]}\` in *${targetGroupName}*`);
+                            fb(`🤖 *Target AI ON* for \`${targetUserId.split('@')[0]}\` in *${targetGroupName}*`);
                         }
-                        break;
-                    }
-                }
-                if (handledTarget) continue;
-
-                if (cl.startsWith('reply all') || cl.startsWith('stop reply all')) {
-                    const isStop = cl.startsWith('stop');
-                    const arg = cmd.replace(/^(stop\s+)?reply\s+all\s*/i, '').trim();
-
-                    if (arg.toLowerCase() === 'dm' || arg.toLowerCase() === 'dms') {
-                        state.replyAllDms = !isStop;
-                        saveSettings();
-                        await fb(isStop ? '🛑 *All DMs Reply OFF*' : '✅ *All DMs Reply ON*');
                         continue;
                     }
-                    if (arg.length > 0) {
-                        const grp = await resolveGroup(sock, arg);
-                        if (!grp) { await fb(`⚠️ Group "${arg}" nahi mila!`); continue; }
-                        state.replyGcs = isStop ? state.replyGcs.filter(id => id !== grp.id) : [...new Set([...state.replyGcs, grp.id])];
-                        saveSettings();
-                        await fb(`${isStop ? '🛑' : '✅'} *GC ReplyAll ${isStop ? 'OFF' : 'ON'}* in *${grp.name}*`);
+
+                    if (cl === 'ai on' || cl.startsWith('ai on ') || cl === 'ai off' || cl.startsWith('ai off ') || cl === 'aion' || cl === 'aioff') {
+                        const isOff = cl.startsWith('ai off') || cl === 'aioff';
+                        const arg = cmd.replace(/^(ai\s+on|ai\s+off|aion|aioff)\s*/i, '').trim();
+
+                        let targetChatId = null;
+                        let targetLabel = '';
+
+                        if (!arg) {
+                            targetChatId = chatId;
+                            targetLabel = isGroup ? (groupCache.get(chatId) || 'Current Group') : chatId.split('@')[0];
+                        } else if (arg.startsWith('@')) {
+                            const grp = await resolveGroupFast(sock, arg);
+                            if (grp) {
+                                targetChatId = grp.id;
+                                targetLabel = `Group: ${grp.name}`;
+                            } else {
+                                const usr = resolveTargetUser(msg, arg);
+                                if (usr) { targetChatId = usr; targetLabel = `DM: ${usr.split('@')[0]}`; }
+                            }
+                        } else {
+                            const usr = resolveTargetUser(msg, arg);
+                            if (usr) {
+                                targetChatId = usr;
+                                targetLabel = `DM: ${usr.split('@')[0]}`;
+                            } else {
+                                const grp = await resolveGroupFast(sock, arg);
+                                if (grp) { targetChatId = grp.id; targetLabel = `Group: ${grp.name}`; }
+                            }
+                        }
+
+                        if (!targetChatId) { fb(`⚠️ Chat ya Number "${arg}" nahi mila!`); continue; }
+
+                        if (isOff) {
+                            state.aiChats = state.aiChats.filter(id => id !== targetChatId);
+                            saveSettings();
+                            fb(`🛑 *AI Reply OFF* for *${targetLabel}*`);
+                        } else {
+                            if (!state.aiChats.includes(targetChatId)) state.aiChats.push(targetChatId);
+                            saveSettings();
+                            fb(`🤖 *AI Reply ON* for *${targetLabel}*`);
+                        }
                         continue;
                     }
-                    if (isGroup) {
-                        state.replyGcs = isStop ? state.replyGcs.filter(id => id !== chatId) : [...new Set([...state.replyGcs, chatId])];
+
+                    if (cl.startsWith('aiprompt ')) {
+                        state.aiSystemPrompt = cmd.slice(9).trim();
                         saveSettings();
-                        await fb(`${isStop ? '🛑' : '✅'} *GC ReplyAll ${isStop ? 'OFF' : 'ON'}*`);
-                    } else {
-                        state.replyAllDms = !isStop;
-                        saveSettings();
-                        await fb(isStop ? '🛑 *All DMs Reply OFF*' : '✅ *All DMs Reply ON*');
+                        fb('✅ *AI System Prompt Updated!*');
+                        continue;
                     }
-                    continue;
-                }
 
-                if (cl === 'reply' || cl.startsWith('reply ') || cl === 'stop reply' || cl.startsWith('stop reply ')) {
-                    const isStop = cl.startsWith('stop');
-                    const arg = cmd.replace(/^(stop\s+)?reply\s*/i, '').trim();
-                    let targetDmId = arg ? await resolveTargetUser(msg, arg) : (!isGroup ? chatId : null);
-                    if (!targetDmId) { await fb('⚠️ DM ke liye number likhein: `*reply 9876543210`'); continue; }
+                    if (cl === 'aistatus') {
+                        const mem = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
+                        const totalTargetAi = Object.values(state.aiTargets).reduce((acc, arr) => acc + arr.length, 0);
+                        fb(
+                            `🤖 *SELECTIVE 8-AI STATUS*\n` +
+                            `• Global AI: ${state.aiGlobalAll ? '🟢 ON' : '🟡 SELECTIVE'}\n` +
+                            `• AI Chats: ${state.aiChats.length} | Targets: ${totalTargetAi}\n` +
+                            `• Session Backup: ${process.env.WA_SESSION_B64 ? '🟢 SAVED' : '🔴 NOT SET'}\n` +
+                            `• RAM: ${mem} MB / 512 MB`,
+                            false
+                        );
+                        continue;
+                    }
 
-                    state.replyDms = isStop ? state.replyDms.filter(id => id !== targetDmId) : [...new Set([...state.replyDms, targetDmId])];
-                    saveSettings();
-                    await fb(`${isStop ? '🛑' : '✅'} *DM Reply ${isStop ? 'OFF' : 'ON'}* for \`${targetDmId.split('@')[0]}\``);
-                    continue;
-                }
+                    if (cl === 'gcmsgs') { fb(`👥 *5 GC REPLIES:*\n${state.gcReplies.map((m, i) => `*${i + 1}.* ${m}`).join('\n')}`, false); continue; }
+                    if (cl === 'dmmsgs') { fb(`💬 *5 DM REPLIES:*\n${state.dmReplies.map((m, i) => `*${i + 1}.* ${m}`).join('\n')}`, false); continue; }
+                    if (cl.startsWith('setgc ')) {
+                        const parts = cmd.split(/\s+/);
+                        const s = parseInt(parts[1]);
+                        if (s >= 1 && s <= 5 && parts.length >= 3) {
+                            state.gcReplies[s - 1] = cmd.replace(/^setgc\s+\d+\s+/i, '');
+                            saveSettings();
+                            fb(`✅ GC Slot #${s} updated`);
+                        }
+                        continue;
+                    }
+                    if (cl.startsWith('setdm ')) {
+                        const parts = cmd.split(/\s+/);
+                        const s = parseInt(parts[1]);
+                        if (s >= 1 && s <= 5 && parts.length >= 3) {
+                            state.dmReplies[s - 1] = cmd.replace(/^setdm\s+\d+\s+/i, '');
+                            saveSettings();
+                            fb(`✅ DM Slot #${s} updated`);
+                        }
+                        continue;
+                    }
 
-                if (cl === 'stopnc' || cl === 'stop nc' || cl === 'unnc') {
-                    stopNcLoop(chatId);
-                    await fb('🛑 *Continuous NC Stopped*');
-                    continue;
-                }
-                if (cl === 'nc' || cl.startsWith('nc ')) {
-                    if (!isGroup) { await fb('⚠️ `*nc` sirf Group me kaam karta hai!'); continue; }
-                    const raw = cmd.slice(2).trim();
-                    const titles = raw ? raw.split(/[|\n,]+/).map(s => s.trim()).filter(Boolean) : state.ncTitles;
-                    startNcLoop(sock, chatId, titles);
-                    await fb(`🚀 *Auto-NC Started* (${titles.length} titles rotating every 4s)`);
-                    continue;
-                }
+                    if (cl.startsWith('target reply') || cl.startsWith('stop target reply')) {
+                        const isStop = cl.startsWith('stop');
+                        const arg = cmd.replace(/^(stop\s+)?target\s+reply\s*/i, '').trim();
+                        const { targetUserId, targetGroupId, targetGroupName } = await parseUserAndGroup(sock, msg, arg, chatId, isGroup);
+                        if (!targetUserId) { fb('⚠️ Target number ya @mention dein!'); continue; }
 
-                if (cl === 'muteall' || cl === 'stop muteall') {
-                    state.muteAllDms = (cl === 'muteall');
-                    if (!state.muteAllDms) state.unmuteExempts = [];
-                    saveSettings();
-                    await fb(state.muteAllDms ? '🔒 *Global DM Mute ON*' : '🔓 *Global DM Mute OFF*');
-                    continue;
-                }
-                if (['mute', 'unmute', 'stop mute', 'mutegc', 'stop mutegc', 'unmutegc'].includes(cl)) {
-                    const isStop = cl.includes('un') || cl.includes('stop');
-                    if (isStop) {
+                        if (!state.targetReplies[targetGroupId]) state.targetReplies[targetGroupId] = [];
+                        if (isStop) {
+                            state.targetReplies[targetGroupId] = state.targetReplies[targetGroupId].filter(id => id !== targetUserId);
+                            saveSettings();
+                            fb(`🛑 *Target Reply OFF* for \`${targetUserId.split('@')[0]}\` in *${targetGroupName}*`);
+                        } else {
+                            if (!state.targetReplies[targetGroupId].includes(targetUserId)) state.targetReplies[targetGroupId].push(targetUserId);
+                            saveSettings();
+                            fb(`🎯 *Target Reply ON* for \`${targetUserId.split('@')[0]}\` in *${targetGroupName}*`);
+                        }
+                        continue;
+                    }
+
+                    const targetMap = [
+                        { prefix: 'target mute', dict: 'targetMutes', label: 'Target Mute' },
+                        { prefix: 'target lock', dict: 'targetLocks', label: 'Target Lock' },
+                        { prefix: 'target nc reply', dict: 'targetNcReply', label: 'Target NC Reply' },
+                        { prefix: 'target nc mute', dict: 'targetNcMute', label: 'Target NC Mute' },
+                        { prefix: 'target nc lock', dict: 'targetNcLock', label: 'Target NC Lock' }
+                    ];
+                    let handledTarget = false;
+                    for (const item of targetMap) {
+                        if (cl.startsWith(item.prefix) || cl.startsWith(`stop ${item.prefix}`)) {
+                            handledTarget = true;
+                            const isStop = cl.startsWith('stop');
+                            const arg = cmd.replace(new RegExp(`^(stop\\s+)?${item.prefix}\\s*`, 'i'), '').trim();
+                            const { targetUserId, targetGroupId, targetGroupName } = await parseUserAndGroup(sock, msg, arg, chatId, isGroup);
+                            if (!targetUserId) { fb('⚠️ Target user nahi mila!'); break; }
+
+                            if (!state[item.dict][targetGroupId]) state[item.dict][targetGroupId] = [];
+                            if (isStop) {
+                                state[item.dict][targetGroupId] = state[item.dict][targetGroupId].filter(id => id !== targetUserId);
+                                saveSettings();
+                                fb(`🛑 *${item.label} OFF* for \`${targetUserId.split('@')[0]}\` in *${targetGroupName}*`);
+                            } else {
+                                if (!state[item.dict][targetGroupId].includes(targetUserId)) state[item.dict][targetGroupId].push(targetUserId);
+                                saveSettings();
+                                fb(`🎯 *${item.label} ON* for \`${targetUserId.split('@')[0]}\` in *${targetGroupName}*`);
+                            }
+                            break;
+                        }
+                    }
+                    if (handledTarget) continue;
+
+                    if (cl.startsWith('reply all') || cl.startsWith('stop reply all')) {
+                        const isStop = cl.startsWith('stop');
+                        const arg = cmd.replace(/^(stop\s+)?reply\s+all\s*/i, '').trim();
+
+                        if (arg.toLowerCase() === 'dm' || arg.toLowerCase() === 'dms') {
+                            state.replyAllDms = !isStop;
+                            saveSettings();
+                            fb(isStop ? '🛑 *All DMs Reply OFF*' : '✅ *All DMs Reply ON*');
+                            continue;
+                        }
+                        if (arg.length > 0) {
+                            const grp = await resolveGroupFast(sock, arg);
+                            if (!grp) { fb(`⚠️ Group "${arg}" nahi mila!`); continue; }
+                            state.replyGcs = isStop ? state.replyGcs.filter(id => id !== grp.id) : [...new Set([...state.replyGcs, grp.id])];
+                            saveSettings();
+                            fb(`${isStop ? '🛑' : '✅'} *GC ReplyAll ${isStop ? 'OFF' : 'ON'}* in *${grp.name}*`);
+                            continue;
+                        }
+                        if (isGroup) {
+                            state.replyGcs = isStop ? state.replyGcs.filter(id => id !== chatId) : [...new Set([...state.replyGcs, chatId])];
+                            saveSettings();
+                            fb(`${isStop ? '🛑' : '✅'} *GC ReplyAll ${isStop ? 'OFF' : 'ON'}*`);
+                        } else {
+                            state.replyAllDms = !isStop;
+                            saveSettings();
+                            fb(isStop ? '🛑 *All DMs Reply OFF*' : '✅ *All DMs Reply ON*');
+                        }
+                        continue;
+                    }
+
+                    if (cl === 'reply' || cl.startsWith('reply ') || cl === 'stop reply' || cl.startsWith('stop reply ')) {
+                        const isStop = cl.startsWith('stop');
+                        const arg = cmd.replace(/^(stop\s+)?reply\s*/i, '').trim();
+                        let targetDmId = arg ? resolveTargetUser(msg, arg) : (!isGroup ? chatId : null);
+                        if (!targetDmId) { fb('⚠️ DM ke liye number likhein: `*reply 9876543210`'); continue; }
+
+                        state.replyDms = isStop ? state.replyDms.filter(id => id !== targetDmId) : [...new Set([...state.replyDms, targetDmId])];
+                        saveSettings();
+                        fb(`${isStop ? '🛑' : '✅'} *DM Reply ${isStop ? 'OFF' : 'ON'}* for \`${targetDmId.split('@')[0]}\``);
+                        continue;
+                    }
+
+                    if (cl === 'stopnc' || cl === 'stop nc' || cl === 'unnc') {
+                        stopNcLoop(chatId);
+                        fb('🛑 *Continuous NC Stopped*');
+                        continue;
+                    }
+                    if (cl === 'nc' || cl.startsWith('nc ')) {
+                        if (!isGroup) { fb('⚠️ `*nc` sirf Group me kaam karta hai!'); continue; }
+                        const raw = cmd.slice(2).trim();
+                        const titles = raw ? raw.split(/[|\n,]+/).map(s => s.trim()).filter(Boolean) : state.ncTitles;
+                        startNcLoop(sock, chatId, titles);
+                        fb(`🚀 *Auto-NC Started* (${titles.length} titles rotating)`);
+                        continue;
+                    }
+
+                    if (cl === 'muteall' || cl === 'stop muteall') {
+                        state.muteAllDms = (cl === 'muteall');
+                        if (!state.muteAllDms) state.unmuteExempts = [];
+                        saveSettings();
+                        fb(state.muteAllDms ? '🔒 *Global DM Mute ON*' : '🔓 *Global DM Mute OFF*');
+                        continue;
+                    }
+                    if (['mute', 'unmute', 'stop mute', 'mutegc', 'stop mutegc', 'unmutegc'].includes(cl)) {
+                        const isStop = cl.includes('un') || cl.includes('stop');
+                        if (isStop) {
+                            state.muteChats = state.muteChats.filter(id => id !== chatId);
+                            if (!state.unmuteExempts.includes(chatId)) state.unmuteExempts.push(chatId);
+                        } else {
+                            if (!state.muteChats.includes(chatId)) state.muteChats.push(chatId);
+                            state.unmuteExempts = state.unmuteExempts.filter(id => id !== chatId);
+                        }
+                        saveSettings();
+                        fb(isStop ? '🛑 *Mute OFF*' : '🔇 *Mute ON*');
+                        continue;
+                    }
+                    if (['lock', 'unlock', 'stop lock', 'lockall', 'unlockall', 'stop lockall'].includes(cl)) {
+                        const isStop = cl.includes('un') || cl.includes('stop');
+                        state.lockChats = isStop ? state.lockChats.filter(id => id !== chatId) : [...new Set([...state.lockChats, chatId])];
+                        saveSettings();
+                        fb(isStop ? '🛑 *Lock OFF*' : '🛡️ *Lock ON*');
+                        continue;
+                    }
+
+                    if (cl === 'pinall' || cl === 'stop pinall' || cl === 'unpinall') {
+                        state.pinAll = (cl === 'pinall');
+                        saveSettings();
+                        fb(state.pinAll ? '📌 *Global Auto-Pin ON*' : '🛑 *Global Auto-Pin OFF*');
+                        continue;
+                    }
+                    if (cl === 'pin except' || cl === 'stop pin except') {
+                        const isStop = cl.startsWith('stop');
+                        state.pinExempts = isStop ? state.pinExempts.filter(id => id !== chatId) : [...new Set([...state.pinExempts, chatId])];
+                        saveSettings();
+                        fb(isStop ? '🛑 *Pin Exception OFF*' : '🛡️ *Pin Exception ON*');
+                        continue;
+                    }
+                    if (['pin', 'pin on', 'stop pin', 'unpin', 'pin off'].includes(cl)) {
+                        const isStop = cl.includes('stop') || cl.includes('un') || cl.includes('off');
+                        state.pinChats = isStop ? state.pinChats.filter(id => id !== chatId) : [...new Set([...state.pinChats, chatId])];
+                        saveSettings();
+                        fb(isStop ? '🛑 *Auto-Pin OFF*' : '📌 *Auto-Pin ON*');
+                        continue;
+                    }
+
+                    if (cl === 'stopall' || cl === 'stop all') {
+                        stopNcLoop(chatId);
+                        state.aiChats = state.aiChats.filter(id => id !== chatId);
+                        state.replyGcs = state.replyGcs.filter(id => id !== chatId);
+                        state.replyDms = state.replyDms.filter(id => id !== chatId);
                         state.muteChats = state.muteChats.filter(id => id !== chatId);
-                        if (!state.unmuteExempts.includes(chatId)) state.unmuteExempts.push(chatId);
-                    } else {
-                        if (!state.muteChats.includes(chatId)) state.muteChats.push(chatId);
-                        state.unmuteExempts = state.unmuteExempts.filter(id => id !== chatId);
+                        state.lockChats = state.lockChats.filter(id => id !== chatId);
+                        state.pinChats = state.pinChats.filter(id => id !== chatId);
+                        delete state.aiTargets[chatId];
+                        delete state.targetReplies[chatId];
+                        delete state.targetMutes[chatId];
+                        delete state.targetLocks[chatId];
+                        saveSettings();
+                        fb('🛑 *All rules, AI & NC cleared for this chat.*');
+                        continue;
                     }
-                    saveSettings();
-                    await fb(isStop ? '🛑 *Mute OFF*' : '🔇 *Mute ON*');
-                    continue;
-                }
-                if (['lock', 'unlock', 'stop lock', 'lockall', 'unlockall', 'stop lockall'].includes(cl)) {
-                    const isStop = cl.includes('un') || cl.includes('stop');
-                    state.lockChats = isStop ? state.lockChats.filter(id => id !== chatId) : [...new Set([...state.lockChats, chatId])];
-                    saveSettings();
-                    await fb(isStop ? '🛑 *Lock OFF*' : '🛡️ *Lock ON*');
-                    continue;
-                }
-
-                if (cl === 'pinall' || cl === 'stop pinall' || cl === 'unpinall') {
-                    state.pinAll = (cl === 'pinall');
-                    saveSettings();
-                    await fb(state.pinAll ? '📌 *Global Auto-Pin ON*' : '🛑 *Global Auto-Pin OFF*');
-                    continue;
-                }
-                if (cl === 'pin except' || cl === 'stop pin except') {
-                    const isStop = cl.startsWith('stop');
-                    state.pinExempts = isStop ? state.pinExempts.filter(id => id !== chatId) : [...new Set([...state.pinExempts, chatId])];
-                    saveSettings();
-                    await fb(isStop ? '🛑 *Pin Exception OFF*' : '🛡️ *Pin Exception ON*');
-                    continue;
-                }
-                if (['pin', 'pin on', 'stop pin', 'unpin', 'pin off'].includes(cl)) {
-                    const isStop = cl.includes('stop') || cl.includes('un') || cl.includes('off');
-                    state.pinChats = isStop ? state.pinChats.filter(id => id !== chatId) : [...new Set([...state.pinChats, chatId])];
-                    saveSettings();
-                    await fb(isStop ? '🛑 *Auto-Pin OFF*' : '📌 *Auto-Pin ON*');
-                    continue;
-                }
-
-                if (cl === 'stopall' || cl === 'stop all') {
-                    stopNcLoop(chatId);
-                    state.aiChats = state.aiChats.filter(id => id !== chatId);
-                    state.replyGcs = state.replyGcs.filter(id => id !== chatId);
-                    state.replyDms = state.replyDms.filter(id => id !== chatId);
-                    state.muteChats = state.muteChats.filter(id => id !== chatId);
-                    state.lockChats = state.lockChats.filter(id => id !== chatId);
-                    state.pinChats = state.pinChats.filter(id => id !== chatId);
-                    delete state.aiTargets[chatId];
-                    delete state.targetReplies[chatId];
-                    delete state.targetMutes[chatId];
-                    delete state.targetLocks[chatId];
-                    saveSettings();
-                    await fb('🛑 *All rules, AI & NC cleared for this chat.*');
-                    continue;
-                }
-                if (cl === 'status') {
-                    const mem = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
-                    const hasAiHere = state.aiGlobalAll || state.aiChats.includes(chatId) || (state.aiTargets[chatId] || []).length > 0;
-                    await fb(
-                        `⚙️ *CHAT & BOT STATUS*\n` +
-                        `• AI Reply Here: ${hasAiHere ? '🟢 ON' : '🔴 OFF'}\n` +
-                        `• 5-Slot Reply Here: ${(state.replyGcs.includes(chatId) || state.replyDms.includes(chatId) || (!isGroup && state.replyAllDms)) ? '🟢 ON' : '🔴 OFF'}\n` +
-                        `• Mute/Lock: ${(state.muteChats.includes(chatId) || state.lockChats.includes(chatId)) ? '🟢 ON' : '🔴 OFF'}\n` +
-                        `• Continuous NC: ${ncIntervals.has(chatId) ? '🟢 ON' : '🔴 OFF'}\n` +
-                        `• Auto-Pin: ${state.pinChats.includes(chatId) || state.pinAll ? '🟢 ON' : '🔴 OFF'}\n` +
-                        `• RAM Usage: ${mem} MB / 512 MB`,
-                        false
-                    );
-                    continue;
-                }
-                continue;
-            }
-
-            // -------------------------------------------------------------
-            // B. INCOMING MESSAGES
-            // -------------------------------------------------------------
-            const isMutedOrLocked =
-                state.lockChats.includes(chatId) ||
-                state.muteChats.includes(chatId) ||
-                (!isGroup && state.muteAllDms && !state.unmuteExempts.includes(chatId)) ||
-                (state.targetMutes[chatId] || []).includes(senderId) ||
-                (state.targetMutes['GLOBAL'] || []).includes(senderId) ||
-                (state.targetLocks[chatId] || []).includes(senderId) ||
-                (state.targetLocks['GLOBAL'] || []).includes(senderId) ||
-                (state.targetNcMute[chatId] || []).includes(senderId) ||
-                (state.targetNcLock[chatId] || []).includes(senderId);
-
-            if (isMutedOrLocked) {
-                if (isGroup && (state.targetNcMute[chatId] || []).includes(senderId)) {
-                    sock.groupUpdateSubject(chatId, `🚫 MUTED: ${senderId.split('@')[0]}`).catch(() => {});
-                }
-                sock.sendMessage(chatId, { delete: msg.key }).catch(() => {});
-                continue;
-            }
-
-            const isTargetNcReply = isGroup && (state.targetNcReply[chatId] || []).includes(senderId);
-
-            const isAiEnabledForThis =
-                state.aiGlobalAll ||
-                state.aiChats.includes(chatId) ||
-                (state.aiTargets[chatId] || []).includes(senderId) ||
-                (state.aiTargets['GLOBAL'] || []).includes(senderId);
-
-            let isNormalReplyEnabled = false;
-            if (isGroup) {
-                isNormalReplyEnabled =
-                    state.replyAllGcs ||
-                    state.replyGcs.includes(chatId) ||
-                    (state.targetReplies[chatId] || []).includes(senderId) ||
-                    (state.targetReplies['GLOBAL'] || []).includes(senderId) ||
-                    isTargetNcReply;
-            } else {
-                isNormalReplyEnabled = state.replyAllDms || state.replyDms.includes(chatId);
-            }
-
-            if (!isAiEnabledForThis && !isNormalReplyEnabled) continue;
-
-            const coolKey = `${chatId}_${senderId}`;
-            const now = Date.now();
-            if (now - (lastReplyTime.get(coolKey) || 0) < COOLDOWN_MS) continue;
-            lastReplyTime.set(coolKey, now);
-
-            try {
-                const senderName = msg.pushName || senderId.split('@')[0];
-                const tagText = `@${senderId.split('@')[0]}`;
-
-                let finalReplyText = null;
-
-                if (isAiEnabledForThis && text.length > 0) {
-                    finalReplyText = await generateAIReply(text, senderName, isGroup);
-                }
-
-                if (!finalReplyText) {
-                    if (isGroup) {
-                        const idx = gcIndex.get(chatId) || 0;
-                        finalReplyText = state.gcReplies[idx % state.gcReplies.length];
-                        gcIndex.set(chatId, (idx + 1) % state.gcReplies.length);
-                    } else {
-                        const idx = dmIndex.get(chatId) || 0;
-                        finalReplyText = state.dmReplies[idx % state.dmReplies.length];
-                        dmIndex.set(chatId, (idx + 1) % state.dmReplies.length);
+                    if (cl === 'status') {
+                        const mem = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
+                        const hasAiHere = state.aiGlobalAll || state.aiChats.includes(chatId) || (state.aiTargets[chatId] || []).length > 0;
+                        fb(
+                            `⚙️ *CHAT & BOT STATUS*\n` +
+                            `• AI Here: ${hasAiHere ? '🟢 ON' : '🔴 OFF'}\n` +
+                            `• 5-Slot Reply: ${(state.replyGcs.includes(chatId) || state.replyDms.includes(chatId) || (!isGroup && state.replyAllDms)) ? '🟢 ON' : '🔴 OFF'}\n` +
+                            `• Mute/Lock: ${(state.muteChats.includes(chatId) || state.lockChats.includes(chatId)) ? '🟢 ON' : '🔴 OFF'}\n` +
+                            `• Continuous NC: ${ncIntervals.has(chatId) ? '🟢 ON' : '🔴 OFF'}\n` +
+                            `• Auto-Pin: ${state.pinChats.includes(chatId) || state.pinAll ? '🟢 ON' : '🔴 OFF'}\n` +
+                            `• RAM: ${mem} MB / 512 MB`,
+                            false
+                        );
+                        continue;
                     }
+                    continue;
                 }
 
-                if (isTargetNcReply) {
-                    sock.groupUpdateSubject(chatId, `🎯 ALERT: ${senderName.slice(0, 18)}`).catch(() => {});
+                // ---------------------------------------------------------
+                // B. INCOMING MESSAGES (NON-BLOCKING)
+                // ---------------------------------------------------------
+                const isMutedOrLocked =
+                    state.lockChats.includes(chatId) ||
+                    state.muteChats.includes(chatId) ||
+                    (!isGroup && state.muteAllDms && !state.unmuteExempts.includes(chatId)) ||
+                    (state.targetMutes[chatId] || []).includes(senderId) ||
+                    (state.targetMutes['GLOBAL'] || []).includes(senderId) ||
+                    (state.targetLocks[chatId] || []).includes(senderId) ||
+                    (state.targetLocks['GLOBAL'] || []).includes(senderId) ||
+                    (state.targetNcMute[chatId] || []).includes(senderId) ||
+                    (state.targetNcLock[chatId] || []).includes(senderId);
+
+                if (isMutedOrLocked) {
+                    if (isGroup && (state.targetNcMute[chatId] || []).includes(senderId)) {
+                        sock.groupUpdateSubject(chatId, `🚫 MUTED: ${senderId.split('@')[0]}`).catch(() => {});
+                    }
+                    sock.sendMessage(chatId, { delete: msg.key }).catch(() => {});
+                    continue;
                 }
 
-                await sock.sendMessage(chatId, {
-                    text: `${tagText} ${finalReplyText}`,
-                    mentions: [senderId]
-                }, { quoted: msg });
-            } catch (err) {
-                console.error('Reply error:', err.message);
+                const isTargetNcReply = isGroup && (state.targetNcReply[chatId] || []).includes(senderId);
+
+                const isAiEnabledForThis =
+                    state.aiGlobalAll ||
+                    state.aiChats.includes(chatId) ||
+                    (state.aiTargets[chatId] || []).includes(senderId) ||
+                    (state.aiTargets['GLOBAL'] || []).includes(senderId);
+
+                let isNormalReplyEnabled = false;
+                if (isGroup) {
+                    isNormalReplyEnabled =
+                        state.replyAllGcs ||
+                        state.replyGcs.includes(chatId) ||
+                        (state.targetReplies[chatId] || []).includes(senderId) ||
+                        (state.targetReplies['GLOBAL'] || []).includes(senderId) ||
+                        isTargetNcReply;
+                } else {
+                    isNormalReplyEnabled = state.replyAllDms || state.replyDms.includes(chatId);
+                }
+
+                if (!isAiEnabledForThis && !isNormalReplyEnabled) continue;
+
+                const coolKey = `${chatId}_${senderId}`;
+                const now = Date.now();
+                if (now - (lastReplyTime.get(coolKey) || 0) < COOLDOWN_MS) continue;
+                lastReplyTime.set(coolKey, now);
+
+                // Run reply generation asynchronously so incoming loop never slows down
+                (async () => {
+                    try {
+                        const senderName = msg.pushName || senderId.split('@')[0];
+                        const tagText = `@${senderId.split('@')[0]}`;
+
+                        let finalReplyText = null;
+                        if (isAiEnabledForThis && text.length > 0) {
+                            finalReplyText = await generateAIReply(text, senderName, isGroup);
+                        }
+
+                        if (!finalReplyText) {
+                            if (isGroup) {
+                                const idx = gcIndex.get(chatId) || 0;
+                                finalReplyText = state.gcReplies[idx % state.gcReplies.length];
+                                gcIndex.set(chatId, (idx + 1) % state.gcReplies.length);
+                            } else {
+                                const idx = dmIndex.get(chatId) || 0;
+                                finalReplyText = state.dmReplies[idx % state.dmReplies.length];
+                                dmIndex.set(chatId, (idx + 1) % state.dmReplies.length);
+                            }
+                        }
+
+                        if (isTargetNcReply) {
+                            sock.groupUpdateSubject(chatId, `🎯 ALERT: ${senderName.slice(0, 18)}`).catch(() => {});
+                        }
+
+                        await sock.sendMessage(chatId, {
+                            text: `${tagText} ${finalReplyText}`,
+                            mentions: [senderId]
+                        }, { quoted: msg });
+                    } catch (err) {}
+                })();
             }
-        }
-    });
+        });
+    } catch (err) {
+        isStarting = false;
+        setTimeout(startWhatsAppBot, 5000);
+    }
 }
 
 startWhatsAppBot();

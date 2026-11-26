@@ -20,7 +20,6 @@ const AUTH_DIR = './auth_info';
 let latestQrPngBuffer = null;
 let isWaConnected = false;
 
-// Restore ONLY creds.json from Render Environment Variable (WA_SESSION_B64)
 function restoreSessionFromEnv() {
     const b64 = process.env.WA_SESSION_B64;
     if (!b64) return false;
@@ -33,7 +32,7 @@ function restoreSessionFromEnv() {
         } else {
             fs.writeFileSync(path.join(AUTH_DIR, 'creds.json'), decoded, 'utf8');
         }
-        console.log('♻️ Restored WhatsApp creds.json from WA_SESSION_B64!');
+        console.log('♻️ Restored WhatsApp session from WA_SESSION_B64!');
         return true;
     } catch (e) {
         console.error('⚠️ Failed to restore WA_SESSION_B64:', e.message);
@@ -41,7 +40,6 @@ function restoreSessionFromEnv() {
     }
 }
 
-// Export ONLY creds.json (Compact & safe for Render Env limits)
 function exportSessionToBase64() {
     const credsPath = path.join(AUTH_DIR, 'creds.json');
     if (!fs.existsSync(credsPath)) return null;
@@ -61,27 +59,31 @@ const API_KEYS = {
     HUGGINGFACE: process.env.HF_API_KEY || "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"
 };
 
+// VERIFIED 8 ACTIVE MODELS (3 Groq + 3 OpenRouter + 2 Hugging Face)
 const AI_MODELS = [
     { name: "1. Groq Llama-3.1-8B", provider: "GROQ", url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.1-8b-instant" },
-    { name: "2. OpenRouter Gemini-2.0-Flash", provider: "OPENROUTER", url: "https://openrouter.ai/api/v1/chat/completions", model: "google/gemini-2.0-flash-exp:free" },
+    { name: "2. OpenRouter Auto-Free", provider: "OPENROUTER", url: "https://openrouter.ai/api/v1/chat/completions", model: "openrouter/free" },
     { name: "3. HF Qwen-2.5-72B", provider: "HUGGINGFACE", url: "https://router.huggingface.co/v1/chat/completions", model: "Qwen/Qwen2.5-72B-Instruct" },
     { name: "4. Groq Llama-3.3-70B", provider: "GROQ", url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.3-70b-versatile" },
-    { name: "5. OpenRouter Llama-3.1-8B", provider: "OPENROUTER", url: "https://openrouter.ai/api/v1/chat/completions", model: "meta-llama/llama-3.1-8b-instruct:free" },
-    { name: "6. HF Mistral-7B-v0.3", provider: "HUGGINGFACE", url: "https://router.huggingface.co/v1/chat/completions", model: "mistralai/Mistral-7B-Instruct-v0.3" },
-    { name: "7. Groq Gemma2-9B", provider: "GROQ", url: "https://api.groq.com/openai/v1/chat/completions", model: "gemma2-9b-it" },
-    { name: "8. OpenRouter Qwen-2.5-7B", provider: "OPENROUTER", url: "https://openrouter.ai/api/v1/chat/completions", model: "qwen/qwen-2.5-7b-instruct:free" }
+    { name: "5. OpenRouter Llama-3.3-70B", provider: "OPENROUTER", url: "https://openrouter.ai/api/v1/chat/completions", model: "meta-llama/llama-3.3-70b-instruct:free" },
+    { name: "6. HF Llama-3.1-8B", provider: "HUGGINGFACE", url: "https://router.huggingface.co/v1/chat/completions", model: "meta-llama/Llama-3.1-8B-Instruct" },
+    { name: "7. Groq Llama-4-Scout", provider: "GROQ", url: "https://api.groq.com/openai/v1/chat/completions", model: "meta-llama/llama-4-scout-17b-16e-instruct" },
+    { name: "8. OpenRouter Mistral-Small", provider: "OPENROUTER", url: "https://openrouter.ai/api/v1/chat/completions", model: "mistralai/mistral-small-3.1-24b-instruct:free" }
 ];
 
 const modelCooldowns = new Map();
 let activeAiCount = 0;
-const MAX_CONCURRENT_AI = 2;
+let lastAiModelUsed = "None yet";
+let lastAiError = "None";
+const MAX_CONCURRENT_AI = 3;
 
 app.get('/', (req, res) => {
     const memUsage = (process.memoryUsage().rss / 1024 / 1024).toFixed(2);
     res.status(200).json({
         status: 'healthy',
         whatsapp_connected: isWaConnected,
-        session_env_configured: Boolean(process.env.WA_SESSION_B64),
+        last_ai_model: lastAiModelUsed,
+        last_ai_error: lastAiError,
         ram_usage_mb: `${memUsage} MB`,
         uptime_sec: Math.floor(process.uptime())
     });
@@ -209,17 +211,17 @@ function saveSettings() {
     } catch (e) {}
 }
 
-// Fast In-Memory Caches (Prevents slow API calls & RAM spikes)
 const gcIndex = new Map();
 const dmIndex = new Map();
 const lastReplyTime = new Map();
 const ncIntervals = new Map();
-const groupCache = new Map(); // { groupJid: groupName }
+const groupCache = new Map();
+const lidToPhoneMap = new Map(); // Maps WhatsApp @lid JIDs to @s.whatsapp.net
 let lastGroupSync = 0;
 const COOLDOWN_MS = 2000;
 
 // =====================================================================
-// 3. 30-SECOND RAM & GARBAGE CLEANER (PREVENTS CRASHES & LAG)
+// 3. 30-SECOND RAM & GARBAGE CLEANER
 // =====================================================================
 setInterval(() => {
     const now = Date.now();
@@ -232,13 +234,14 @@ setInterval(() => {
     if (gcIndex.size > 200) gcIndex.clear();
     if (dmIndex.size > 200) dmIndex.clear();
     if (groupCache.size > 300) groupCache.clear();
+    if (lidToPhoneMap.size > 500) lidToPhoneMap.clear();
     if (global.gc) {
         try { global.gc(); } catch (e) {}
     }
 }, 30000);
 
 // =====================================================================
-// 4. 8-MODEL TRI-PROVIDER FALLBACK GENERATOR (3.5s FAST TIMEOUT)
+// 4. 8-MODEL TRI-PROVIDER FALLBACK GENERATOR (8s TIMEOUT + ERROR LOGGING)
 // =====================================================================
 async function generateAIReply(userMessage, senderName, isGroup) {
     if (activeAiCount >= MAX_CONCURRENT_AI) return null;
@@ -255,15 +258,15 @@ async function generateAIReply(userMessage, senderName, isGroup) {
             if (now < cooldownUntil) continue;
 
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 3500);
+            const timeout = setTimeout(() => controller.abort(), 8000); // 8s reliable timeout
 
             const headers = {
                 'Authorization': `Bearer ${apiKey}`,
                 'Content-Type': 'application/json'
             };
             if (cfg.provider === 'OPENROUTER') {
-                headers['HTTP-Referer'] = 'https://wa-userbot.local';
-                headers['X-Title'] = 'WA Userbot';
+                headers['HTTP-Referer'] = 'https://render.com';
+                headers['X-Title'] = 'WA-Userbot';
             }
 
             try {
@@ -274,9 +277,9 @@ async function generateAIReply(userMessage, senderName, isGroup) {
                         model: cfg.model,
                         messages: [
                             { role: "system", content: `${state.aiSystemPrompt} Replying to ${senderName} in a ${isGroup ? 'group' : 'DM'}.` },
-                            { role: "user", content: userMessage.slice(0, 250) }
+                            { role: "user", content: userMessage.slice(0, 300) }
                         ],
-                        max_tokens: 80,
+                        max_tokens: 90,
                         temperature: 0.7
                     }),
                     signal: controller.signal
@@ -284,19 +287,27 @@ async function generateAIReply(userMessage, senderName, isGroup) {
                 clearTimeout(timeout);
 
                 if (response.status === 429 || response.status === 402 || response.status === 503) {
+                    lastAiError = `${cfg.name}: Rate/Quota (${response.status})`;
                     modelCooldowns.set(cfg.name, Date.now() + 60000);
                     continue;
                 }
                 if (!response.ok) {
+                    const errTxt = await response.text().catch(() => '');
+                    lastAiError = `${cfg.name}: HTTP ${response.status} ${errTxt.slice(0, 60)}`;
                     modelCooldowns.set(cfg.name, Date.now() + 30000);
                     continue;
                 }
 
                 const data = await response.json();
                 const reply = data?.choices?.[0]?.message?.content?.trim();
-                if (reply) return reply;
+                if (reply) {
+                    lastAiModelUsed = cfg.name;
+                    lastAiError = "None";
+                    return reply;
+                }
             } catch (err) {
                 clearTimeout(timeout);
+                lastAiError = `${cfg.name}: ${err.name === 'AbortError' ? 'Timeout' : err.message}`;
                 modelCooldowns.set(cfg.name, Date.now() + 20000);
                 continue;
             }
@@ -308,12 +319,34 @@ async function generateAIReply(userMessage, senderName, isGroup) {
 }
 
 // =====================================================================
-// 5. INSTANT CACHED RESOLVERS (ZERO LAG)
+// 5. UNIVERSAL JID / LID / PHONE MATCHER & RESOLVERS
 // =====================================================================
 function normalizeJid(raw) {
+    if (!raw) return null;
+    if (raw.endsWith('@lid')) return raw;
     let digits = raw.replace(/\D/g, '');
     if (digits.length === 10) digits = '91' + digits;
     return digits ? `${digits}@s.whatsapp.net` : null;
+}
+
+// Checks if incoming senderId (could be @lid or @s.whatsapp.net) matches any saved ID in list
+function matchesUserList(list, senderId, msg) {
+    if (!Array.isArray(list) || list.length === 0) return false;
+    if (list.includes(senderId)) return true;
+
+    const senderDigits = senderId.split('@')[0].split(':')[0];
+    const mappedPhone = lidToPhoneMap.get(senderId);
+    const mappedDigits = mappedPhone ? mappedPhone.split('@')[0] : null;
+    const altPn = msg?.key?.participantAlt || msg?.key?.remoteJidAlt || '';
+    const altDigits = altPn ? altPn.split('@')[0].split(':')[0] : null;
+
+    for (const saved of list) {
+        const savedDigits = saved.split('@')[0].split(':')[0];
+        if (savedDigits === senderDigits) return true;
+        if (mappedDigits && savedDigits === mappedDigits) return true;
+        if (altDigits && savedDigits === altDigits) return true;
+    }
+    return false;
 }
 
 function extractText(msg) {
@@ -348,25 +381,25 @@ async function resolveGroupFast(sock, groupQuery) {
     const search = groupQuery.replace(/^@/, '').toLowerCase().trim();
     if (!search) return null;
 
-    // 1. Search instant memory cache first (0ms)
     for (const [jid, name] of groupCache.entries()) {
-        if (name.toLowerCase().includes(search)) {
-            return { id: jid, name };
-        }
+        if (name.toLowerCase().includes(search)) return { id: jid, name };
     }
 
-    // 2. Sync group list at most once every 5 minutes to prevent lag/crash
-    if (Date.now() - lastGroupSync > 300000) {
+    if (Date.now() - lastGroupSync > 120000) {
         lastGroupSync = Date.now();
         try {
             const groups = await sock.groupFetchAllParticipating();
             for (const [jid, meta] of Object.entries(groups)) {
                 if (meta.subject) groupCache.set(jid, meta.subject);
+                if (Array.isArray(meta.participants)) {
+                    for (const p of meta.participants) {
+                        if (p.id && p.phoneNumber) lidToPhoneMap.set(p.id, p.phoneNumber);
+                        if (p.lid && p.id) lidToPhoneMap.set(p.lid, p.id);
+                    }
+                }
             }
             for (const [jid, name] of groupCache.entries()) {
-                if (name.toLowerCase().includes(search)) {
-                    return { id: jid, name };
-                }
+                if (name.toLowerCase().includes(search)) return { id: jid, name };
             }
         } catch (e) {}
     }
@@ -424,7 +457,7 @@ function stopNcLoop(chatId) {
 }
 
 // =====================================================================
-// 6. START BAILEYS WHATSAPP SOCKET (SINGLE INSTANCE GUARD)
+// 6. START BAILEYS WHATSAPP SOCKET
 // =====================================================================
 let isStarting = false;
 
@@ -449,10 +482,15 @@ async function startWhatsAppBot() {
 
         sock.ev.on('creds.update', saveCreds);
 
-        // Cache group names automatically whenever groups update
         sock.ev.on('groups.update', (updates) => {
             for (const g of updates) {
                 if (g.id && g.subject) groupCache.set(g.id, g.subject);
+            }
+        });
+
+        sock.ev.on('contacts.upsert', (contacts) => {
+            for (const c of contacts) {
+                if (c.lid && c.id) lidToPhoneMap.set(c.lid, c.id);
             }
         });
 
@@ -461,11 +499,7 @@ async function startWhatsAppBot() {
             if (qr) {
                 isWaConnected = false;
                 try {
-                    latestQrPngBuffer = await QRCode.toBuffer(qr, {
-                        type: 'png',
-                        width: 180,
-                        margin: 1
-                    });
+                    latestQrPngBuffer = await QRCode.toBuffer(qr, { type: 'png', width: 180, margin: 1 });
                     console.log('📸 QR Ready! Open Render URL + /qr to scan.');
                 } catch (e) {}
             }
@@ -482,17 +516,22 @@ async function startWhatsAppBot() {
                 isWaConnected = true;
                 isStarting = false;
                 latestQrPngBuffer = null;
-                console.log('✅ WhatsApp Connected & Fast! Open /session to copy WA_SESSION_B64.');
-                // Populate group cache in background 3s after connect
+                console.log('✅ WhatsApp Connected & Ready!');
                 setTimeout(async () => {
                     try {
                         const groups = await sock.groupFetchAllParticipating();
                         for (const [jid, meta] of Object.entries(groups)) {
                             if (meta.subject) groupCache.set(jid, meta.subject);
+                            if (Array.isArray(meta.participants)) {
+                                for (const p of meta.participants) {
+                                    if (p.id && p.phoneNumber) lidToPhoneMap.set(p.id, p.phoneNumber);
+                                    if (p.lid && p.id) lidToPhoneMap.set(p.lid, p.id);
+                                }
+                            }
                         }
                         lastGroupSync = Date.now();
                     } catch (e) {}
-                }, 3000);
+                }, 2500);
             }
         });
 
@@ -508,8 +547,16 @@ async function startWhatsAppBot() {
                 const senderId = isGroup ? (msg.key.participant || chatId) : chatId;
                 const text = extractText(msg);
 
+                // Learn LID <-> Phone mapping automatically from message metadata
+                if (msg.key.participant && msg.key.participantAlt) {
+                    lidToPhoneMap.set(msg.key.participant, msg.key.participantAlt);
+                }
+                if (msg.key.remoteJid && msg.key.remoteJidAlt) {
+                    lidToPhoneMap.set(msg.key.remoteJid, msg.key.remoteJidAlt);
+                }
+
                 // ---------------------------------------------------------
-                // A. OUTGOING COMMANDS (INSTANT EXECUTION)
+                // A. OUTGOING COMMANDS
                 // ---------------------------------------------------------
                 if (fromMe) {
                     if (!text.startsWith('*')) {
@@ -528,7 +575,7 @@ async function startWhatsAppBot() {
                             if (autoDel && sent?.key) {
                                 setTimeout(() => {
                                     sock.sendMessage(chatId, { delete: sent.key }).catch(() => {});
-                                }, 4000);
+                                }, 4500);
                             }
                         }).catch(() => {});
                     };
@@ -543,6 +590,7 @@ async function startWhatsAppBot() {
                             `• \`*target ai @user/num [@group]\` ➔ Target AI ON\n` +
                             `• \`*stop target ai @user/num [@group]\` ➔ Target AI OFF\n` +
                             `• \`*ai all on\` / \`*ai all off\` ➔ Global AI\n` +
+                            `• \`*aitest\` ➔ Live test 8-AI models\n` +
                             `• \`*aiprompt <text>\` / \`*aistatus\`\n\n` +
                             `🎯 *5-Slot Target & Chat Replies:*\n` +
                             `• \`*target reply @user/num [@group]\` / \`*stop target reply...\`\n` +
@@ -556,6 +604,18 @@ async function startWhatsAppBot() {
                             `• \`*status\` / \`*stopall\``,
                             false
                         );
+                        continue;
+                    }
+
+                    // --- LIVE AI TEST COMMAND (*aitest) ---
+                    if (cl === 'aitest' || cl === 'testai') {
+                        fb('⏳ Testing 8-Model AI Chain...', false);
+                        const testReply = await generateAIReply("Hello bhai, kya haal hai?", "TestUser", false);
+                        if (testReply) {
+                            fb(`✅ *AI Working!*\n• Model: \`${lastAiModelUsed}\`\n• Reply: ${testReply}`, false);
+                        } else {
+                            fb(`❌ *AI Failed!*\n• Last Error: \`${lastAiError}\``, false);
+                        }
                         continue;
                     }
 
@@ -649,7 +709,8 @@ async function startWhatsAppBot() {
                             `🤖 *SELECTIVE 8-AI STATUS*\n` +
                             `• Global AI: ${state.aiGlobalAll ? '🟢 ON' : '🟡 SELECTIVE'}\n` +
                             `• AI Chats: ${state.aiChats.length} | Targets: ${totalTargetAi}\n` +
-                            `• Session Backup: ${process.env.WA_SESSION_B64 ? '🟢 SAVED' : '🔴 NOT SET'}\n` +
+                            `• Last Model: \`${lastAiModelUsed}\`\n` +
+                            `• Last Error: \`${lastAiError}\`\n` +
                             `• RAM: ${mem} MB / 512 MB`,
                             false
                         );
@@ -869,45 +930,45 @@ async function startWhatsAppBot() {
                 }
 
                 // ---------------------------------------------------------
-                // B. INCOMING MESSAGES (NON-BLOCKING)
+                // B. INCOMING MESSAGES (UNIVERSAL LID + PHONE MATCHING)
                 // ---------------------------------------------------------
                 const isMutedOrLocked =
                     state.lockChats.includes(chatId) ||
                     state.muteChats.includes(chatId) ||
                     (!isGroup && state.muteAllDms && !state.unmuteExempts.includes(chatId)) ||
-                    (state.targetMutes[chatId] || []).includes(senderId) ||
-                    (state.targetMutes['GLOBAL'] || []).includes(senderId) ||
-                    (state.targetLocks[chatId] || []).includes(senderId) ||
-                    (state.targetLocks['GLOBAL'] || []).includes(senderId) ||
-                    (state.targetNcMute[chatId] || []).includes(senderId) ||
-                    (state.targetNcLock[chatId] || []).includes(senderId);
+                    matchesUserList(state.targetMutes[chatId], senderId, msg) ||
+                    matchesUserList(state.targetMutes['GLOBAL'], senderId, msg) ||
+                    matchesUserList(state.targetLocks[chatId], senderId, msg) ||
+                    matchesUserList(state.targetLocks['GLOBAL'], senderId, msg) ||
+                    matchesUserList(state.targetNcMute[chatId], senderId, msg) ||
+                    matchesUserList(state.targetNcLock[chatId], senderId, msg);
 
                 if (isMutedOrLocked) {
-                    if (isGroup && (state.targetNcMute[chatId] || []).includes(senderId)) {
+                    if (isGroup && matchesUserList(state.targetNcMute[chatId], senderId, msg)) {
                         sock.groupUpdateSubject(chatId, `🚫 MUTED: ${senderId.split('@')[0]}`).catch(() => {});
                     }
                     sock.sendMessage(chatId, { delete: msg.key }).catch(() => {});
                     continue;
                 }
 
-                const isTargetNcReply = isGroup && (state.targetNcReply[chatId] || []).includes(senderId);
+                const isTargetNcReply = isGroup && matchesUserList(state.targetNcReply[chatId], senderId, msg);
 
                 const isAiEnabledForThis =
                     state.aiGlobalAll ||
-                    state.aiChats.includes(chatId) ||
-                    (state.aiTargets[chatId] || []).includes(senderId) ||
-                    (state.aiTargets['GLOBAL'] || []).includes(senderId);
+                    matchesUserList(state.aiChats, chatId, msg) ||
+                    matchesUserList(state.aiTargets[chatId], senderId, msg) ||
+                    matchesUserList(state.aiTargets['GLOBAL'], senderId, msg);
 
                 let isNormalReplyEnabled = false;
                 if (isGroup) {
                     isNormalReplyEnabled =
                         state.replyAllGcs ||
                         state.replyGcs.includes(chatId) ||
-                        (state.targetReplies[chatId] || []).includes(senderId) ||
-                        (state.targetReplies['GLOBAL'] || []).includes(senderId) ||
+                        matchesUserList(state.targetReplies[chatId], senderId, msg) ||
+                        matchesUserList(state.targetReplies['GLOBAL'], senderId, msg) ||
                         isTargetNcReply;
                 } else {
-                    isNormalReplyEnabled = state.replyAllDms || state.replyDms.includes(chatId);
+                    isNormalReplyEnabled = state.replyAllDms || matchesUserList(state.replyDms, chatId, msg);
                 }
 
                 if (!isAiEnabledForThis && !isNormalReplyEnabled) continue;
@@ -917,7 +978,6 @@ async function startWhatsAppBot() {
                 if (now - (lastReplyTime.get(coolKey) || 0) < COOLDOWN_MS) continue;
                 lastReplyTime.set(coolKey, now);
 
-                // Run reply generation asynchronously so incoming loop never slows down
                 (async () => {
                     try {
                         const senderName = msg.pushName || senderId.split('@')[0];
